@@ -10,11 +10,19 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Play, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Plus, Trash2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { CONTEXTS, CONTENT_TYPES, deriveCategoriesFromCriteria } from "@/config/hierarchy";
+import { CONTENT_TYPES, deriveCategoriesFromCriteria } from "@/config/hierarchy";
 import type { EvalRun, Criterion, ContentType } from "@/types";
+import { loadManagedTaxonomy, loadRuntimeCriteria } from "@/data/runtime-taxonomy";
 
 interface ContentEntry {
   id: number;
@@ -40,32 +48,58 @@ const EvaluatePage = () => {
   const [expandedHistoryCategories, setExpandedHistoryCategories] = useState<Set<string>>(new Set());
   const [selectionMode, setSelectionMode] = useState<string>("suite");
 
-  const allCriteria: Criterion[] = MOCK_CRITERIA;
+  const runtimeCriteria = useMemo(() => loadRuntimeCriteria(), []);
+  const runtimeTaxonomy = useMemo(() => loadManagedTaxonomy(runtimeCriteria), [runtimeCriteria]);
+  const allCriteria: Criterion[] = runtimeCriteria;
   // Hierarchy-based selection
-  const [selectedContexts, setSelectedContexts] = useState<Set<string>>(() => new Set(CONTEXTS));
-  const [selectedContentTypes, setSelectedContentTypes] = useState<Set<string>>(() => new Set(CONTENT_TYPES));
+  const [selectedContexts, setSelectedContexts] = useState<Set<string>>(() => new Set(runtimeTaxonomy.contexts));
+  const [selectedContentTypes, setSelectedContentTypes] = useState<Set<string>>(() => new Set(runtimeTaxonomy.contentTypes));
+  const [selectedBrands, setSelectedBrands] = useState<Set<string>>(new Set());
+  const [selectedIndustries, setSelectedIndustries] = useState<Set<string>>(new Set());
+  const [selectedMarketplaces, setSelectedMarketplaces] = useState<Set<string>>(new Set());
   const [selectedCategories, setSelectedCategories] = useState<Set<string>>(() => new Set());
   const [selectedCriteriaIds, setSelectedCriteriaIds] = useState<Set<string>>(() => new Set());
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
+  const [activeCriteriaTab, setActiveCriteriaTab] = useState("all");
   const lightCheckboxClass =
-    "rounded-full border-slate-300 data-[state=checked]:bg-slate-500 data-[state=checked]:border-slate-500 focus-visible:ring-slate-300";
+    "h-5 w-5 !rounded-[4px] border-slate-300 data-[state=checked]:bg-slate-500 data-[state=checked]:border-slate-500 focus-visible:ring-slate-300";
+  const contextButtonBase = "h-11 px-6";
+  const contextButtonActive = "bg-[#1f3b67] border-[#1f3b67] text-white hover:bg-[#1f3b67]/95";
+  const contextButtonInactive = "bg-background";
 
   const hierarchyFiltered = useMemo(() => {
     return allCriteria.filter(c => {
       if (!selectedContexts.has(c.context)) return false;
       if (!selectedContentTypes.has(c.content_type)) return false;
+      if (c.context === "Brand" && selectedBrands.size > 0 && (!c.brand_tag || !selectedBrands.has(c.brand_tag))) return false;
+      if (c.context === "Industry" && selectedIndustries.size > 0 && (!c.industry_tag || !selectedIndustries.has(c.industry_tag))) return false;
+      if (c.context === "Marketplace" && selectedMarketplaces.size > 0 && (!c.marketplace_tag || !selectedMarketplaces.has(c.marketplace_tag))) return false;
       if (!selectedCategories.has(c.criteria_category)) return false;
       if (!selectedCriteriaIds.has(c.id)) return false;
       return true;
     });
-  }, [allCriteria, selectedContexts, selectedContentTypes, selectedCategories, selectedCriteriaIds]);
+  }, [
+    allCriteria,
+    selectedContexts,
+    selectedContentTypes,
+    selectedBrands,
+    selectedIndustries,
+    selectedMarketplaces,
+    selectedCategories,
+    selectedCriteriaIds,
+  ]);
 
   const filteredCriteria = useMemo(
     () =>
       allCriteria.filter(
-        c => selectedContexts.has(c.context) && selectedContentTypes.has(c.content_type),
+        c =>
+          selectedContexts.has(c.context) &&
+          selectedContentTypes.has(c.content_type) &&
+          (c.context !== "Brand" || selectedBrands.size === 0 || (c.brand_tag ? selectedBrands.has(c.brand_tag) : false)) &&
+          (c.context !== "Industry" || selectedIndustries.size === 0 || (c.industry_tag ? selectedIndustries.has(c.industry_tag) : false)) &&
+          (c.context !== "Marketplace" || selectedMarketplaces.size === 0 || (c.marketplace_tag ? selectedMarketplaces.has(c.marketplace_tag) : false)),
       ),
-    [allCriteria, selectedContexts, selectedContentTypes],
+    [allCriteria, selectedContexts, selectedContentTypes, selectedBrands, selectedIndustries, selectedMarketplaces],
   );
 
   const availableCategories = useMemo(
@@ -80,6 +114,36 @@ const EvaluatePage = () => {
         return acc;
       }, {}),
     [availableCategories, filteredCriteria],
+  );
+
+  const criteriaTabOptions = useMemo(
+    () => ["all", ...runtimeTaxonomy.contexts.filter((context) => selectedContexts.has(context))],
+    [runtimeTaxonomy.contexts, selectedContexts],
+  );
+
+  useEffect(() => {
+    if (!criteriaTabOptions.includes(activeCriteriaTab)) {
+      setActiveCriteriaTab("all");
+    }
+  }, [criteriaTabOptions, activeCriteriaTab]);
+
+  const criteriaInActiveTab = useMemo(
+    () => (activeCriteriaTab === "all" ? filteredCriteria : filteredCriteria.filter((criterion) => criterion.context === activeCriteriaTab)),
+    [filteredCriteria, activeCriteriaTab],
+  );
+
+  const displayedCategories = useMemo(
+    () => deriveCategoriesFromCriteria(criteriaInActiveTab),
+    [criteriaInActiveTab],
+  );
+
+  const displayedCriteriaByCategory = useMemo(
+    () =>
+      displayedCategories.reduce<Record<string, typeof criteriaInActiveTab>>((acc, category) => {
+        acc[category] = criteriaInActiveTab.filter(c => c.criteria_category === category);
+        return acc;
+      }, {}),
+    [displayedCategories, criteriaInActiveTab],
   );
 
   // Keep selections valid as context/content filters change.
@@ -111,6 +175,12 @@ const EvaluatePage = () => {
     }
   }, [availableCategories, filteredCriteria, selectedCategories, selectedCriteriaIds]);
 
+  useEffect(() => {
+    if (!selectedContexts.has("Brand") && selectedBrands.size > 0) setSelectedBrands(new Set());
+    if (!selectedContexts.has("Industry") && selectedIndustries.size > 0) setSelectedIndustries(new Set());
+    if (!selectedContexts.has("Marketplace") && selectedMarketplaces.size > 0) setSelectedMarketplaces(new Set());
+  }, [selectedContexts, selectedBrands.size, selectedIndustries.size, selectedMarketplaces.size]);
+
   const toggleSetValue = (
     value: string,
     setter: (updater: (prev: Set<string>) => Set<string>) => void,
@@ -126,23 +196,61 @@ const EvaluatePage = () => {
     });
   };
 
-  const toggleCategory = (category: string) => {
-    const categoryCriteriaIds = criteriaByCategory[category]?.map(c => c.id) || [];
-    const isSelected = selectedCategories.has(category);
+  const setToAll = (
+    options: string[],
+    setter: (updater: (prev: Set<string>) => Set<string>) => void,
+  ) => {
+    setter(() => new Set(options));
+  };
 
-    setSelectedCategories(prev => {
+  const clearSet = (
+    setter: (updater: (prev: Set<string>) => Set<string>) => void,
+  ) => {
+    setter(() => new Set());
+  };
+
+  const getMultiSelectLabel = (
+    selected: Set<string>,
+    options: string[],
+    allLabel: string,
+    emptyMeansAll: boolean,
+  ) => {
+    if (selected.size === 0) return emptyMeansAll ? allLabel : "None selected";
+    if (selected.size === options.length) return allLabel;
+    if (selected.size === 1) return [...selected][0];
+    return `${selected.size} selected`;
+  };
+
+  const areAllDisplayedCategoriesExpanded =
+    displayedCategories.length > 0 && displayedCategories.every((category) => expandedCategories.has(category));
+
+  const toggleAllDisplayedCategories = () => {
+    setExpandedCategories((prev) => {
       const next = new Set(prev);
-      if (isSelected) next.delete(category); else next.add(category);
+      if (areAllDisplayedCategoriesExpanded) {
+        displayedCategories.forEach((category) => next.delete(category));
+      } else {
+        displayedCategories.forEach((category) => next.add(category));
+      }
       return next;
     });
+  };
+
+  const toggleCategory = (category: string) => {
+    const categoryCriteriaIds = criteriaByCategory[category]?.map(c => c.id) || [];
+    const anySelected = categoryCriteriaIds.some((id) => selectedCriteriaIds.has(id));
 
     setSelectedCriteriaIds(prev => {
       const next = new Set(prev);
-      if (isSelected) {
-        categoryCriteriaIds.forEach(id => next.delete(id));
-      } else {
-        categoryCriteriaIds.forEach(id => next.add(id));
-      }
+      if (anySelected) categoryCriteriaIds.forEach(id => next.delete(id));
+      else categoryCriteriaIds.forEach(id => next.add(id));
+
+      const nextCategories = new Set<string>();
+      availableCategories.forEach((categoryName) => {
+        const hasAnySelected = (criteriaByCategory[categoryName] || []).some((criterion) => next.has(criterion.id));
+        if (hasAnySelected) nextCategories.add(categoryName);
+      });
+      setSelectedCategories(nextCategories);
       return next;
     });
   };
@@ -390,58 +498,197 @@ const EvaluatePage = () => {
             </TabsContent>
 
             <TabsContent value="hierarchy" className="mt-3 space-y-4">
-              {/* Context & Content Type selectors */}
               <div className="space-y-4">
                 <div className="space-y-2">
                   <label className="text-xs font-medium text-muted-foreground">Context</label>
-                  <div className="flex items-center gap-4 overflow-x-auto pb-1">
-                    {CONTEXTS.map(ctx => (
-                      <label key={ctx} className="inline-flex shrink-0 items-center gap-2 text-sm cursor-pointer whitespace-nowrap">
-                        <Checkbox
-                          className={lightCheckboxClass}
-                          checked={selectedContexts.has(ctx)}
-                          onCheckedChange={() => toggleSetValue(ctx, setSelectedContexts)}
-                        />
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    {runtimeTaxonomy.contexts.map((ctx) => (
+                      <Button
+                        key={ctx}
+                        type="button"
+                        variant={selectedContexts.has(ctx) ? "default" : "outline"}
+                        className={`${contextButtonBase} ${selectedContexts.has(ctx) ? contextButtonActive : contextButtonInactive}`}
+                        onClick={() => toggleSetValue(ctx, setSelectedContexts)}
+                      >
                         {ctx}
-                      </label>
+                      </Button>
                     ))}
                   </div>
                 </div>
+
+                {selectedContexts.has("Industry") && (
+                  <div className="space-y-2">
+                    <label className="block text-xs font-medium text-muted-foreground">Industries</label>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="outline" className="w-full justify-between font-normal">
+                          {getMultiSelectLabel(selectedIndustries, runtimeTaxonomy.branchTags.industries, "All Industries", true)}
+                          <ChevronDown className="h-4 w-4 opacity-60" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
+                        <DropdownMenuCheckboxItem
+                          checked={selectedIndustries.size === 0 || selectedIndustries.size === runtimeTaxonomy.branchTags.industries.length}
+                          onSelect={(e) => e.preventDefault()}
+                          onCheckedChange={() => clearSet(setSelectedIndustries)}
+                        >
+                          All Industries
+                        </DropdownMenuCheckboxItem>
+                        <DropdownMenuSeparator />
+                        {runtimeTaxonomy.branchTags.industries.map((industry) => (
+                          <DropdownMenuCheckboxItem
+                            key={industry}
+                            checked={selectedIndustries.has(industry)}
+                            onSelect={(e) => e.preventDefault()}
+                            onCheckedChange={() => toggleSetValue(industry, setSelectedIndustries)}
+                          >
+                            {industry}
+                          </DropdownMenuCheckboxItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                )}
+
+                {selectedContexts.has("Marketplace") && (
+                  <div className="space-y-2">
+                    <label className="block text-xs font-medium text-muted-foreground">Marketplaces</label>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="outline" className="w-full justify-between font-normal">
+                          {getMultiSelectLabel(selectedMarketplaces, runtimeTaxonomy.branchTags.marketplaces, "All Marketplaces", true)}
+                          <ChevronDown className="h-4 w-4 opacity-60" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
+                        <DropdownMenuCheckboxItem
+                          checked={selectedMarketplaces.size === 0 || selectedMarketplaces.size === runtimeTaxonomy.branchTags.marketplaces.length}
+                          onSelect={(e) => e.preventDefault()}
+                          onCheckedChange={() => clearSet(setSelectedMarketplaces)}
+                        >
+                          All Marketplaces
+                        </DropdownMenuCheckboxItem>
+                        <DropdownMenuSeparator />
+                        {runtimeTaxonomy.branchTags.marketplaces.map((marketplace) => (
+                          <DropdownMenuCheckboxItem
+                            key={marketplace}
+                            checked={selectedMarketplaces.has(marketplace)}
+                            onSelect={(e) => e.preventDefault()}
+                            onCheckedChange={() => toggleSetValue(marketplace, setSelectedMarketplaces)}
+                          >
+                            {marketplace}
+                          </DropdownMenuCheckboxItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                )}
+
+                {selectedContexts.has("Brand") && (
+                  <div className="space-y-2">
+                    <label className="block text-xs font-medium text-muted-foreground">Brands</label>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="outline" className="w-full justify-between font-normal">
+                          {getMultiSelectLabel(selectedBrands, runtimeTaxonomy.branchTags.brands, "All Brands", true)}
+                          <ChevronDown className="h-4 w-4 opacity-60" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
+                        <DropdownMenuCheckboxItem
+                          checked={selectedBrands.size === 0 || selectedBrands.size === runtimeTaxonomy.branchTags.brands.length}
+                          onSelect={(e) => e.preventDefault()}
+                          onCheckedChange={() => clearSet(setSelectedBrands)}
+                        >
+                          All Brands
+                        </DropdownMenuCheckboxItem>
+                        <DropdownMenuSeparator />
+                        {runtimeTaxonomy.branchTags.brands.map((brand) => (
+                          <DropdownMenuCheckboxItem
+                            key={brand}
+                            checked={selectedBrands.has(brand)}
+                            onSelect={(e) => e.preventDefault()}
+                            onCheckedChange={() => toggleSetValue(brand, setSelectedBrands)}
+                          >
+                            {brand}
+                          </DropdownMenuCheckboxItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <label className="text-xs font-medium text-muted-foreground">Content Type</label>
-                  <div className="flex items-center gap-4 overflow-x-auto pb-1">
-                    {CONTENT_TYPES.map(ct => (
-                      <label key={ct} className="inline-flex shrink-0 items-center gap-2 text-sm cursor-pointer whitespace-nowrap">
-                        <Checkbox
-                          className={lightCheckboxClass}
-                          checked={selectedContentTypes.has(ct)}
-                          onCheckedChange={() => toggleSetValue(ct, setSelectedContentTypes)}
-                        />
-                        {ct}
-                      </label>
-                    ))}
-                  </div>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="outline" className="w-full justify-between font-normal">
+                        {getMultiSelectLabel(selectedContentTypes, runtimeTaxonomy.contentTypes, "All Content Types", false)}
+                        <ChevronDown className="h-4 w-4 opacity-60" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
+                      <DropdownMenuCheckboxItem
+                        checked={selectedContentTypes.size === runtimeTaxonomy.contentTypes.length}
+                        onSelect={(e) => e.preventDefault()}
+                        onCheckedChange={() => setToAll(runtimeTaxonomy.contentTypes, setSelectedContentTypes)}
+                      >
+                        All Content Types
+                      </DropdownMenuCheckboxItem>
+                      <DropdownMenuSeparator />
+                      {runtimeTaxonomy.contentTypes.map((contentType) => (
+                        <DropdownMenuCheckboxItem
+                          key={contentType}
+                          checked={selectedContentTypes.has(contentType)}
+                          onSelect={(e) => e.preventDefault()}
+                          onCheckedChange={() => toggleSetValue(contentType, setSelectedContentTypes)}
+                        >
+                          {contentType}
+                        </DropdownMenuCheckboxItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </div>
               </div>
 
-              {/* Category toggles */}
               <div className="space-y-2">
-                <label className="text-xs font-medium text-muted-foreground">Criteria Categories (multi-select)</label>
+                <label className="text-xs font-medium text-muted-foreground">Criteria Categories</label>
                 <div className="space-y-2 border rounded-lg p-3">
-                  {availableCategories.length === 0 ? (
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <Tabs value={activeCriteriaTab} onValueChange={setActiveCriteriaTab}>
+                      <TabsList className="h-auto flex-wrap justify-start">
+                        {criteriaTabOptions.map((tab) => (
+                          <TabsTrigger key={tab} value={tab} className="capitalize">
+                            {tab}
+                          </TabsTrigger>
+                        ))}
+                      </TabsList>
+                    </Tabs>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0"
+                      onClick={toggleAllDisplayedCategories}
+                    >
+                      {areAllDisplayedCategoriesExpanded ? "Hide criteria" : "Show criteria"}
+                    </Button>
+                  </div>
+                  {displayedCategories.length === 0 ? (
                     <p className="text-xs text-muted-foreground">No categories available for the selected filters.</p>
                   ) : (
-                    availableCategories.map(category => {
-                      const criteria = criteriaByCategory[category] || [];
+                    displayedCategories.map(category => {
+                      const criteria = displayedCriteriaByCategory[category] || [];
                       const isExpanded = expandedCategories.has(category);
                       const selectedCount = criteria.filter(c => selectedCriteriaIds.has(c.id)).length;
+                      const anyInCategorySelected = selectedCount > 0;
                       return (
                         <Collapsible key={category} open={isExpanded}>
                           <div className="flex items-center justify-between py-1.5">
                             <label className="flex items-center gap-2 text-sm cursor-pointer">
                               <Checkbox
                                 className={lightCheckboxClass}
-                                checked={selectedCategories.has(category)}
+                                checked={anyInCategorySelected}
                                 onCheckedChange={() => toggleCategory(category)}
                               />
                               <span>{category}</span>
@@ -462,12 +709,11 @@ const EvaluatePage = () => {
                           <CollapsibleContent className="space-y-1 pl-6 pb-2">
                             {criteria.map(criterion => (
                               <label key={criterion.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                                <Checkbox
-                                  className={lightCheckboxClass}
-                                  checked={selectedCriteriaIds.has(criterion.id)}
-                                  disabled={!selectedCategories.has(category)}
-                                  onCheckedChange={() => toggleCriterion(category, criterion.id)}
-                                />
+                              <Checkbox
+                                className={lightCheckboxClass}
+                                checked={selectedCriteriaIds.has(criterion.id)}
+                                onCheckedChange={() => toggleCriterion(category, criterion.id)}
+                              />
                                 <span className={!criterion.active ? "text-muted-foreground" : ""}>
                                   {criterion.criteria_name}
                                 </span>

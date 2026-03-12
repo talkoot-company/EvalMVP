@@ -1,8 +1,8 @@
 import type { EvalContext, ContentType, CriteriaType } from "@/types";
 
-export const CONTEXTS: EvalContext[] = ["General", "Industry", "Marketplace", "Brand"];
+export const CONTEXTS: EvalContext[] = ["Universal", "Industry", "Marketplace", "Brand"];
 
-export const CONTENT_TYPES: ContentType[] = ["Title", "Description", "Bullets/Specs", "Meta Description"];
+export const CONTENT_TYPES: ContentType[] = ["Description", "Title", "Bullets/Specs", "Meta Description"];
 
 export const CRITERIA_TYPES: { value: CriteriaType; label: string }[] = [
   { value: "yes-no", label: "Yes / No" },

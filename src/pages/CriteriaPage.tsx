@@ -1,16 +1,37 @@
-import { useState, useMemo } from "react";
-import { MOCK_CRITERIA } from "@/data/mock-data";
+import { useState, useMemo, useEffect, type Dispatch, type SetStateAction } from "react";
 import { AddCriterionDialog } from "@/components/AddCriterionDialog";
 import { UploadCriteriaDialog } from "@/components/UploadCriteriaDialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Search, Filter, Plus, Trash2, Pencil, Upload } from "lucide-react";
+import { Search, Plus, Trash2, Pencil, Upload, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { Criterion } from "@/types";
-import { CONTEXTS, CONTENT_TYPES, CRITERIA_TYPES, deriveCategoriesFromCriteria } from "@/config/hierarchy";
+import type { Criterion, CustomTagCategory } from "@/types";
+import { CRITERIA_TYPES } from "@/config/hierarchy";
+import {
+  loadManagedTaxonomy,
+  loadRuntimeCriteria,
+  saveManagedTaxonomy,
+  saveRuntimeCriteria,
+} from "@/data/runtime-taxonomy";
+
+const normalizeTag = (value: string) => value.trim().replace(/\s+/g, " ");
+
+const uniqueTags = (values: string[]) => Array.from(new Set(values.map(normalizeTag).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+const isAllSelected = (selected: Set<string>, options: string[]) => selected.size === 0 || selected.size === options.length;
+const getFilterLabel = (selected: Set<string>, options: string[], allLabel: string) => {
+  if (isAllSelected(selected, options)) return allLabel;
+  if (selected.size === 1) return [...selected][0];
+  return `${selected.size} selected`;
+};
 
 const CriterionDefinitionsTable = ({ criterion }: { criterion: Criterion }) => {
   if (criterion.criteria_type === "yes-no") {
@@ -121,28 +142,194 @@ const CriterionDefinitionsTable = ({ criterion }: { criterion: Criterion }) => {
 
 const CriteriaPage = () => {
   const [search, setSearch] = useState("");
-  const [contextFilter, setContextFilter] = useState<string>("all");
-  const [typeFilter, setTypeFilter] = useState<string>("all");
-  const [contentTypeFilter, setContentTypeFilter] = useState<string>("all");
-  const [categoryFilter, setCategoryFilter] = useState<string>("all");
-  const [criteria, setCriteria] = useState<Criterion[]>(MOCK_CRITERIA);
+  const [contextFilter, setContextFilter] = useState<Set<string>>(new Set());
+  const [typeFilter, setTypeFilter] = useState<Set<string>>(new Set());
+  const [contentTypeFilter, setContentTypeFilter] = useState<Set<string>>(new Set());
+  const [categoryFilter, setCategoryFilter] = useState<Set<string>>(new Set());
+  const [brandFilter, setBrandFilter] = useState<Set<string>>(new Set());
+  const [industryFilter, setIndustryFilter] = useState<Set<string>>(new Set());
+  const [marketplaceFilter, setMarketplaceFilter] = useState<Set<string>>(new Set());
+  const [criteria, setCriteria] = useState<Criterion[]>(() => loadRuntimeCriteria());
+  const [contextOptions] = useState<string[]>(() => loadManagedTaxonomy().contexts);
+  const [contentTypeOptions] = useState<string[]>(() => loadManagedTaxonomy().contentTypes);
+  const [criteriaCategoriesByContentType, setCriteriaCategoriesByContentType] = useState<Record<string, string[]>>(
+    () => loadManagedTaxonomy().criteriaCategoriesByContentType,
+  );
+  const [branchTags, setBranchTags] = useState(() => loadManagedTaxonomy().branchTags);
+  const [customTagCategories, setCustomTagCategories] = useState<CustomTagCategory[]>(() => loadManagedTaxonomy().customTagCategories);
+  const [customTagFilters, setCustomTagFilters] = useState<Record<string, Set<string>>>({});
   const [addOpen, setAddOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [editingCriterion, setEditingCriterion] = useState<Criterion | null>(null);
 
-  const categories = useMemo(() => deriveCategoriesFromCriteria(criteria), [criteria]);
+  const criteriaCategoryOptions = useMemo(
+    () => uniqueTags(Object.values(criteriaCategoriesByContentType).flat()),
+    [criteriaCategoriesByContentType],
+  );
+
+  const customFilterCategories = useMemo(
+    () => customTagCategories.filter((category) => category.tags.length > 0),
+    [customTagCategories],
+  );
+
+  useEffect(() => {
+    setCustomTagFilters((prev) => {
+      const next: Record<string, Set<string>> = {};
+      customFilterCategories.forEach((category) => {
+        const existing = prev[category.name] || new Set<string>();
+        const valid = new Set([...existing].filter((entry) => category.tags.includes(entry)));
+        next[category.name] = valid;
+      });
+      return next;
+    });
+  }, [customFilterCategories]);
+
+  useEffect(() => {
+    saveRuntimeCriteria(criteria);
+  }, [criteria]);
+
+  useEffect(() => {
+    saveManagedTaxonomy({
+      contexts: contextOptions,
+      contentTypes: contentTypeOptions,
+      criteriaCategories: uniqueTags(criteriaCategoryOptions),
+      criteriaCategoriesByContentType: Object.fromEntries(
+        contentTypeOptions.map((contentType) => [
+          contentType,
+          uniqueTags(criteriaCategoriesByContentType[contentType] || []),
+        ]),
+      ),
+      branchTags: {
+        brands: uniqueTags(branchTags.brands),
+        industries: uniqueTags(branchTags.industries),
+        marketplaces: uniqueTags(branchTags.marketplaces),
+      },
+      customTagCategories: customTagCategories
+        .map((category) => ({ name: normalizeTag(category.name), tags: uniqueTags(category.tags) }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    });
+  }, [contextOptions, contentTypeOptions, criteriaCategoryOptions, criteriaCategoriesByContentType, branchTags, customTagCategories]);
 
   const filtered = useMemo(() => {
     return criteria.filter(c => {
       const matchesSearch = c.criteria_name.toLowerCase().includes(search.toLowerCase()) ||
         c.criteria_definition.toLowerCase().includes(search.toLowerCase());
-      const matchesContext = contextFilter === "all" || c.context === contextFilter;
-      const matchesType = typeFilter === "all" || c.criteria_type === typeFilter;
-      const matchesContentType = contentTypeFilter === "all" || c.content_type === contentTypeFilter;
-      const matchesCategory = categoryFilter === "all" || c.criteria_category === categoryFilter;
-      return matchesSearch && matchesContext && matchesType && matchesContentType && matchesCategory;
+      const matchesContext = contextFilter.size === 0 || contextFilter.has(c.context);
+      const matchesType = typeFilter.size === 0 || typeFilter.has(c.criteria_type);
+      const matchesContentType = contentTypeFilter.size === 0 || contentTypeFilter.has(c.content_type);
+      const matchesCategory = categoryFilter.size === 0 || categoryFilter.has(c.criteria_category);
+      const matchesBrand = brandFilter.size === 0 || (c.brand_tag ? brandFilter.has(c.brand_tag) : false);
+      const matchesIndustry = industryFilter.size === 0 || (c.industry_tag ? industryFilter.has(c.industry_tag) : false);
+      const matchesMarketplace = marketplaceFilter.size === 0 || (c.marketplace_tag ? marketplaceFilter.has(c.marketplace_tag) : false);
+      const matchesCustomTags = customFilterCategories.every((customCategory) => {
+        const selectedTags = customTagFilters[customCategory.name] || new Set<string>();
+        if (selectedTags.size === 0) return true;
+        const criterionTags = c.custom_tags?.[customCategory.name] || [];
+        return criterionTags.some((tag) => selectedTags.has(tag));
+      });
+      return (
+        matchesSearch &&
+        matchesContext &&
+        matchesType &&
+        matchesContentType &&
+        matchesCategory &&
+        matchesBrand &&
+        matchesIndustry &&
+        matchesMarketplace &&
+        matchesCustomTags
+      );
     });
-  }, [criteria, search, contextFilter, typeFilter, contentTypeFilter, categoryFilter]);
+  }, [
+    criteria,
+    search,
+    contextFilter,
+    typeFilter,
+    contentTypeFilter,
+    categoryFilter,
+    brandFilter,
+    industryFilter,
+    marketplaceFilter,
+    customFilterCategories,
+    customTagFilters,
+  ]);
+
+  const syncTaxonomyFromCriteria = (items: Criterion[]) => {
+    setCriteriaCategoriesByContentType((prev) => {
+      const next: Record<string, string[]> = { ...prev };
+      items.forEach((criterion) => {
+        const contentType = criterion.content_type;
+        const category = criterion.criteria_category;
+        next[contentType] = uniqueTags([...(next[contentType] || []), category]);
+      });
+      return next;
+    });
+    setBranchTags((prev) => ({
+      brands: uniqueTags([...prev.brands, ...items.map((criterion) => criterion.brand_tag || "").filter(Boolean)]),
+      industries: uniqueTags([...prev.industries, ...items.map((criterion) => criterion.industry_tag || "").filter(Boolean)]),
+      marketplaces: uniqueTags([...prev.marketplaces, ...items.map((criterion) => criterion.marketplace_tag || "").filter(Boolean)]),
+    }));
+    setCustomTagCategories((prev) => {
+      const tagMap = new Map(prev.map((category) => [category.name, new Set(category.tags)]));
+      items.forEach((criterion) => {
+        Object.entries(criterion.custom_tags || {}).forEach(([categoryName, tags]) => {
+          const next = tagMap.get(categoryName) || new Set<string>();
+          tags.forEach((tag) => next.add(tag));
+          tagMap.set(categoryName, next);
+        });
+      });
+      return Array.from(tagMap.entries())
+        .map(([name, tags]) => ({ name, tags: Array.from(tags).sort((a, b) => a.localeCompare(b)) }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    });
+  };
+
+  const handleAddBranchTag = (branchType: "brands" | "industries" | "marketplaces", tag: string) => {
+    const normalizedTag = normalizeTag(tag);
+    if (!normalizedTag) return;
+    setBranchTags((prev) => ({
+      ...prev,
+      [branchType]: uniqueTags([...(prev[branchType] || []), normalizedTag]),
+    }));
+  };
+
+  const toggleFilterValue = (
+    value: string,
+    setter: Dispatch<SetStateAction<Set<string>>>,
+  ) => {
+    setter((prev) => {
+      const next = new Set(prev);
+      if (next.has(value)) next.delete(value);
+      else next.add(value);
+      return next;
+    });
+  };
+
+  const clearFilter = (setter: Dispatch<SetStateAction<Set<string>>>) => {
+    setter(new Set());
+  };
+
+  const toggleCustomFilterValue = (categoryName: string, value: string) => {
+    setCustomTagFilters((prev) => {
+      const current = prev[categoryName] || new Set<string>();
+      const nextSet = new Set(current);
+      if (nextSet.has(value)) nextSet.delete(value);
+      else nextSet.add(value);
+      return { ...prev, [categoryName]: nextSet };
+    });
+  };
+
+  const clearCustomFilter = (categoryName: string) => {
+    setCustomTagFilters((prev) => ({ ...prev, [categoryName]: new Set<string>() }));
+  };
+
+  const handleAddCategoryForContentType = (contentType: string, category: string) => {
+    const normalizedCategory = normalizeTag(category);
+    if (!contentType || !normalizedCategory) return;
+    setCriteriaCategoriesByContentType((prev) => ({
+      ...prev,
+      [contentType]: uniqueTags([...(prev[contentType] || []), normalizedCategory]),
+    }));
+  };
 
   const handleDeleteCriterion = (id: string) => {
     setCriteria(prev => prev.filter(c => c.id !== id));
@@ -150,14 +337,17 @@ const CriteriaPage = () => {
 
   const handleAddCriterion = (criterion: Criterion) => {
     setCriteria(prev => [criterion, ...prev]);
+    syncTaxonomyFromCriteria([criterion]);
   };
 
   const handleUpdateCriterion = (criterion: Criterion) => {
     setCriteria(prev => prev.map(c => (c.id === criterion.id ? criterion : c)));
+    syncTaxonomyFromCriteria([criterion]);
   };
 
   const handleUploadCriteria = (importedCriteria: Criterion[]) => {
     setCriteria(prev => [...importedCriteria, ...prev]);
+    syncTaxonomyFromCriteria(importedCriteria);
   };
 
   const handleDialogOpenChange = (open: boolean) => {
@@ -172,7 +362,6 @@ const CriteriaPage = () => {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Criteria</h1>
-          <p className="text-sm text-muted-foreground mt-1">Manage evaluation criteria across contexts and categories</p>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -195,56 +384,204 @@ const CriteriaPage = () => {
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="relative flex-1 min-w-[200px] max-w-sm">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search criteria..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-9"
-          />
+      <div className="space-y-3">
+        <div className="space-y-1 max-w-2xl">
+          <p className="text-xs font-medium text-muted-foreground">Search</p>
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search criteria..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-9"
+            />
+          </div>
         </div>
-        <Select value={contextFilter} onValueChange={setContextFilter}>
-          <SelectTrigger className="w-40">
-            <Filter className="h-3.5 w-3.5 mr-2 text-muted-foreground" />
-            <SelectValue placeholder="Context" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Contexts</SelectItem>
-            {CONTEXTS.map(ctx => <SelectItem key={ctx} value={ctx}>{ctx}</SelectItem>)}
-          </SelectContent>
-        </Select>
-        <Select value={typeFilter} onValueChange={setTypeFilter}>
-          <SelectTrigger className="w-40">
-            <SelectValue placeholder="Score Type" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Types</SelectItem>
-            {CRITERIA_TYPES.map(ct => <SelectItem key={ct.value} value={ct.value}>{ct.label}</SelectItem>)}
-          </SelectContent>
-        </Select>
-        <Select value={contentTypeFilter} onValueChange={setContentTypeFilter}>
-          <SelectTrigger className="w-40">
-            <SelectValue placeholder="Content Type" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Content</SelectItem>
-            {CONTENT_TYPES.map(ct => <SelectItem key={ct} value={ct}>{ct}</SelectItem>)}
-          </SelectContent>
-        </Select>
-        <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-          <SelectTrigger className="w-48">
-            <SelectValue placeholder="Category" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Categories</SelectItem>
-            {categories.map(cat => <SelectItem key={cat} value={cat}>{cat}</SelectItem>)}
-          </SelectContent>
-        </Select>
+
+        <div className="flex items-end gap-3 overflow-x-auto pb-1 whitespace-nowrap">
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-muted-foreground">Context</p>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" className="w-40 justify-between font-normal">
+                {getFilterLabel(contextFilter, contextOptions, "All Contexts")}
+                <ChevronDown className="h-4 w-4 opacity-60" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-56">
+              <DropdownMenuCheckboxItem checked={isAllSelected(contextFilter, contextOptions)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => clearFilter(setContextFilter)}>All Contexts</DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
+              {contextOptions.map((option) => (
+                <DropdownMenuCheckboxItem key={option} checked={contextFilter.has(option)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => toggleFilterValue(option, setContextFilter)}>
+                  {option}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-muted-foreground">Score Type</p>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" className="w-40 justify-between font-normal">
+                {getFilterLabel(typeFilter, CRITERIA_TYPES.map((ct) => ct.value), "All Types")}
+                <ChevronDown className="h-4 w-4 opacity-60" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-56">
+              <DropdownMenuCheckboxItem checked={isAllSelected(typeFilter, CRITERIA_TYPES.map((ct) => ct.value))} onSelect={(e) => e.preventDefault()} onCheckedChange={() => clearFilter(setTypeFilter)}>All Types</DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
+              {CRITERIA_TYPES.map((option) => (
+                <DropdownMenuCheckboxItem key={option.value} checked={typeFilter.has(option.value)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => toggleFilterValue(option.value, setTypeFilter)}>
+                  {option.label}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-muted-foreground">Content Type</p>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" className="w-40 justify-between font-normal">
+                {getFilterLabel(contentTypeFilter, contentTypeOptions, "All Content")}
+                <ChevronDown className="h-4 w-4 opacity-60" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-56">
+              <DropdownMenuCheckboxItem checked={isAllSelected(contentTypeFilter, contentTypeOptions)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => clearFilter(setContentTypeFilter)}>All Content</DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
+              {contentTypeOptions.map((option) => (
+                <DropdownMenuCheckboxItem key={option} checked={contentTypeFilter.has(option)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => toggleFilterValue(option, setContentTypeFilter)}>
+                  {option}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-muted-foreground">Category</p>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" className="w-48 justify-between font-normal">
+                {getFilterLabel(categoryFilter, criteriaCategoryOptions, "All Categories")}
+                <ChevronDown className="h-4 w-4 opacity-60" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-64">
+              <DropdownMenuCheckboxItem checked={isAllSelected(categoryFilter, criteriaCategoryOptions)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => clearFilter(setCategoryFilter)}>All Categories</DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
+              {criteriaCategoryOptions.map((option) => (
+                <DropdownMenuCheckboxItem key={option} checked={categoryFilter.has(option)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => toggleFilterValue(option, setCategoryFilter)}>
+                  {option}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-muted-foreground">Brand</p>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" className="w-44 justify-between font-normal">
+                {getFilterLabel(brandFilter, branchTags.brands, "All Brands")}
+                <ChevronDown className="h-4 w-4 opacity-60" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-56">
+              <DropdownMenuCheckboxItem checked={isAllSelected(brandFilter, branchTags.brands)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => clearFilter(setBrandFilter)}>All Brands</DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
+              {branchTags.brands.map((option) => (
+                <DropdownMenuCheckboxItem key={option} checked={brandFilter.has(option)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => toggleFilterValue(option, setBrandFilter)}>
+                  {option}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-muted-foreground">Industry</p>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" className="w-44 justify-between font-normal">
+                {getFilterLabel(industryFilter, branchTags.industries, "All Industries")}
+                <ChevronDown className="h-4 w-4 opacity-60" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-64">
+              <DropdownMenuCheckboxItem checked={isAllSelected(industryFilter, branchTags.industries)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => clearFilter(setIndustryFilter)}>All Industries</DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
+              {branchTags.industries.map((option) => (
+                <DropdownMenuCheckboxItem key={option} checked={industryFilter.has(option)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => toggleFilterValue(option, setIndustryFilter)}>
+                  {option}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-muted-foreground">Marketplace</p>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" className="w-44 justify-between font-normal">
+                {getFilterLabel(marketplaceFilter, branchTags.marketplaces, "All Marketplaces")}
+                <ChevronDown className="h-4 w-4 opacity-60" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-56">
+              <DropdownMenuCheckboxItem checked={isAllSelected(marketplaceFilter, branchTags.marketplaces)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => clearFilter(setMarketplaceFilter)}>All Marketplaces</DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
+              {branchTags.marketplaces.map((option) => (
+                <DropdownMenuCheckboxItem key={option} checked={marketplaceFilter.has(option)} onSelect={(e) => e.preventDefault()} onCheckedChange={() => toggleFilterValue(option, setMarketplaceFilter)}>
+                  {option}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+        {customFilterCategories.map((customCategory) => (
+          <div key={`filter-${customCategory.name}`} className="space-y-1">
+            <p className="text-xs font-medium text-muted-foreground">{customCategory.name}</p>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" className="w-48 justify-between font-normal">
+                  {getFilterLabel(customTagFilters[customCategory.name] || new Set<string>(), customCategory.tags, `All ${customCategory.name}`)}
+                  <ChevronDown className="h-4 w-4 opacity-60" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent className="w-64">
+                <DropdownMenuCheckboxItem
+                  checked={isAllSelected(customTagFilters[customCategory.name] || new Set<string>(), customCategory.tags)}
+                  onSelect={(e) => e.preventDefault()}
+                  onCheckedChange={() => clearCustomFilter(customCategory.name)}
+                >
+                  All {customCategory.name}
+                </DropdownMenuCheckboxItem>
+                <DropdownMenuSeparator />
+                {customCategory.tags.map((tag) => (
+                  <DropdownMenuCheckboxItem
+                    key={`${customCategory.name}-${tag}`}
+                    checked={(customTagFilters[customCategory.name] || new Set<string>()).has(tag)}
+                    onSelect={(e) => e.preventDefault()}
+                    onCheckedChange={() => toggleCustomFilterValue(customCategory.name, tag)}
+                  >
+                    {tag}
+                  </DropdownMenuCheckboxItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        ))}
         <span className="text-xs text-muted-foreground">
           {filtered.length} of {criteria.length} criteria
         </span>
+        </div>
       </div>
 
       {/* Criteria list */}
@@ -258,15 +595,32 @@ const CriteriaPage = () => {
                     <h3 className="text-sm font-semibold">{c.criteria_name}</h3>
                     <span className="text-xs text-muted-foreground">Weight: <span className="font-medium text-foreground">{c.weight}</span></span>
                     <Badge variant="outline" className="text-[10px] font-normal border-blue-200 bg-blue-50 text-blue-700">{c.context}</Badge>
+                    {c.context === "Brand" && c.brand_tag && (
+                      <Badge variant="outline" className="text-[10px] font-normal border-slate-300 bg-slate-50 text-slate-700">
+                        Brand: {c.brand_tag}
+                      </Badge>
+                    )}
+                    {c.context === "Industry" && c.industry_tag && (
+                      <Badge variant="outline" className="text-[10px] font-normal border-slate-300 bg-slate-50 text-slate-700">
+                        Industry: {c.industry_tag}
+                      </Badge>
+                    )}
+                    {c.context === "Marketplace" && c.marketplace_tag && (
+                      <Badge variant="outline" className="text-[10px] font-normal border-slate-300 bg-slate-50 text-slate-700">
+                        Marketplace: {c.marketplace_tag}
+                      </Badge>
+                    )}
                     <Badge variant="outline" className="text-[10px] font-normal border-violet-200 bg-violet-50 text-violet-700">{c.content_type}</Badge>
                     <Badge variant="outline" className="text-[10px] font-normal border-amber-200 bg-amber-50 text-amber-700">{c.criteria_category}</Badge>
-                    {(c.customer || c.brand) && (
-                      <div className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-slate-50 px-2 py-1 text-[10px] font-medium text-slate-700">
-                        {c.customer && <span>Customer: {c.customer}</span>}
-                        {c.customer && c.brand && <span className="text-slate-400">|</span>}
-                        {c.brand && <span>Brand: {c.brand}</span>}
-                      </div>
-                    )}
+                    {Object.entries(c.custom_tags || {}).map(([customCategory, tags]) => (
+                      <Badge
+                        key={`${c.id}-${customCategory}`}
+                        variant="outline"
+                        className="text-[10px] font-normal border-slate-300 bg-slate-50 text-slate-700"
+                      >
+                        {customCategory}: {tags.join(", ")}
+                      </Badge>
+                    ))}
                   </div>
                   <p className="text-sm text-muted-foreground leading-relaxed">{c.criteria_definition}</p>
                   <div>
@@ -308,6 +662,12 @@ const CriteriaPage = () => {
         onAdd={handleAddCriterion}
         onUpdate={handleUpdateCriterion}
         initialCriterion={editingCriterion}
+        contextOptions={contextOptions}
+        contentTypeOptions={contentTypeOptions}
+        criteriaCategoriesByContentType={criteriaCategoriesByContentType}
+        branchTags={branchTags}
+        onAddBranchTag={handleAddBranchTag}
+        onAddCategoryForContentType={handleAddCategoryForContentType}
       />
 
       <UploadCriteriaDialog

@@ -101,8 +101,9 @@ const normalizeCriteriaType = (value: unknown): CriteriaType => {
 
 const normalizeContext = (value: unknown): EvalContext => {
   const raw = String(value || "").trim();
+  if (raw.toLowerCase() === "general") return "Universal";
   const found = CONTEXTS.find((ctx) => ctx.toLowerCase() === raw.toLowerCase());
-  return found || "General";
+  return found || "Universal";
 };
 
 const normalizeContentType = (value: unknown): ContentType => {
@@ -175,6 +176,22 @@ const rowToCriterion = (row: FlatCriterionRow, index: number): Criterion => {
     evalDefinition.no_examples = parseList(String(row.no_examples));
   }
 
+  let customTags: Record<string, string[]> | undefined;
+  if (row.custom_tags) {
+    try {
+      const parsedCustomTags = typeof row.custom_tags === "string" ? JSON.parse(row.custom_tags) : row.custom_tags;
+      if (parsedCustomTags && typeof parsedCustomTags === "object") {
+        customTags = Object.fromEntries(
+          Object.entries(parsedCustomTags as Record<string, unknown>)
+            .map(([categoryName, tags]) => [categoryName, Array.isArray(tags) ? tags.map(String).map((item) => item.trim()).filter(Boolean) : []])
+            .filter(([, tags]) => tags.length > 0),
+        );
+      }
+    } catch {
+      throw new Error(`Row ${index + 2}: custom_tags must be valid JSON when provided.`);
+    }
+  }
+
   return {
     id: String(row.id || slugify(`${criteriaName}-${Date.now()}-${index}`)),
     customer: String(row.customer || "").trim() || undefined,
@@ -186,6 +203,7 @@ const rowToCriterion = (row: FlatCriterionRow, index: number): Criterion => {
     criteria_definition: criteriaDefinition,
     criteria_type: criteriaType,
     eval_definition: evalDefinition,
+    custom_tags: customTags,
     weight: Number(row.weight) > 0 ? Number(row.weight) : 1,
     active: parseBoolean(row.active, true),
     created_at: String(row.created_at || now),
@@ -279,6 +297,10 @@ export const UploadCriteriaDialog = ({ open, onOpenChange, onUpload }: UploadCri
               </p>
               <p>
                 Optional columns: <code>id</code>, <code>customer</code>, <code>brand</code>, <code>active</code>, <code>created_at</code>, <code>updated_at</code>.
+              </p>
+              <p>
+                Optional <code>custom_tags</code> should be JSON object by category, e.g.
+                <code>{` {"Channel":["Email","PDP"],"Region":["US"]} `}</code>
               </p>
               <p>
                 <code>eval_definition</code> must be JSON and depends on <code>criteria_type</code>:
