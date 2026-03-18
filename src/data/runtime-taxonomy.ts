@@ -13,6 +13,7 @@ export interface ManagedTaxonomy {
   contexts: string[];
   contentTypes: string[];
   criteriaCategories: string[];
+  criteriaCategoriesByContextAndContentType: Record<string, Record<string, string[]>>;
   criteriaCategoriesByContentType: Record<string, string[]>;
   branchTags: {
     brands: string[];
@@ -36,6 +37,33 @@ const MARKETPLACE_SEED = ["Target", "Kroger", "Walmart", "Instacart", "Amazon"];
 
 const BRAND_SEED = ["Adidas", "Nike", "Puma", "Reebok", "New Balance"];
 
+const CATEGORY_SEED_BY_CONTEXT_AND_CONTENT_TYPE: Record<string, Record<string, string[]>> = {
+  Universal: {
+    Description: ["Benefit Communication", "Feature Coverage", "Readability and Flow", "Call to Action Clarity"],
+    Title: ["Product Type Clarity", "Primary Benefit Clarity", "Keyword Presence", "Length and Scannability"],
+    "Bullets/Specs": ["Spec Completeness", "Attribute Prioritization", "Scannability", "Format Consistency"],
+    "Meta Description": ["Search Intent Match", "Keyword Placement", "Value Proposition", "Length Compliance"],
+  },
+  Industry: {
+    Description: ["Industry Terminology", "Regulatory Framing", "Use Case Relevance", "Claim Substantiation"],
+    Title: ["Category Terminology", "Compliance-Safe Wording", "Audience Fit", "Differentiation"],
+    "Bullets/Specs": ["Technical Accuracy", "Required Disclosures", "Category-Specific Attributes", "Spec Hierarchy"],
+    "Meta Description": ["Industry Keyword Targeting", "Trust Signals", "Compliance Tone", "SERP Differentiation"],
+  },
+  Marketplace: {
+    Description: ["Marketplace Policy Compliance", "Conversion Focus", "Discoverability", "Listing Clarity"],
+    Title: ["Marketplace Keyword Alignment", "Character Limit Fit", "Variant Distinction", "Promo Readiness"],
+    "Bullets/Specs": ["Bullet Policy Compliance", "Buy-Decision Attributes", "Mobile Scannability", "Competitive Differentiation"],
+    "Meta Description": ["Marketplace Search Relevance", "Click Appeal", "Policy Safety", "Query Coverage"],
+  },
+  Brand: {
+    Description: ["Brand Voice Alignment", "Brand Story Consistency", "Audience Positioning", "Tone Consistency"],
+    Title: ["Brand Naming Conventions", "Voice Consistency", "Portfolio Differentiation", "Brand Promise Clarity"],
+    "Bullets/Specs": ["Brand Messaging Pillars", "Signature Attribute Framing", "Tone in Short Form", "Proof Point Integration"],
+    "Meta Description": ["Brand Voice in SERP", "Message Consistency", "Positioning Clarity", "Brand Recall"],
+  },
+};
+
 const deriveCustomTagCategories = (criteria: Criterion[]): CustomTagCategory[] => {
   const categoryMap = new Map<string, Set<string>>();
   criteria.forEach((criterion) => {
@@ -50,28 +78,59 @@ const deriveCustomTagCategories = (criteria: Criterion[]): CustomTagCategory[] =
     .sort((a, b) => a.name.localeCompare(b.name));
 };
 
-const deriveCriteriaCategoriesByContentType = (
+const getSeedCategoriesForPair = (context: string, contentType: string) =>
+  CATEGORY_SEED_BY_CONTEXT_AND_CONTENT_TYPE[context]?.[contentType] || DEFAULT_CATEGORIES;
+
+const deriveCriteriaCategoriesByContextAndContentType = (
   criteria: Criterion[],
-): Record<string, string[]> => {
-  const map = new Map<string, Set<string>>();
-  CONTENT_TYPES.forEach((contentType) => {
-    map.set(contentType, new Set(DEFAULT_CATEGORIES));
+): Record<string, Record<string, string[]>> => {
+  const map = new Map<string, Map<string, Set<string>>>();
+
+  CONTEXTS.forEach((context) => {
+    const contextMap = new Map<string, Set<string>>();
+    CONTENT_TYPES.forEach((contentType) => {
+      contextMap.set(contentType, new Set(getSeedCategoriesForPair(context, contentType)));
+    });
+    map.set(context, contextMap);
   });
+
   criteria.forEach((criterion) => {
+    const context = normalizeTag(normalizeContextValue(criterion.context || ""));
     const contentType = normalizeTag(criterion.content_type || "");
     const category = normalizeTag(criterion.criteria_category || "");
-    if (!contentType || !category) return;
-    const next = map.get(contentType) || new Set<string>();
-    next.add(category);
-    map.set(contentType, next);
+    if (!context || !contentType || !category) return;
+
+    const contextMap = map.get(context) || new Map<string, Set<string>>();
+    const nextCategories = contextMap.get(contentType) || new Set(getSeedCategoriesForPair(context, contentType));
+    nextCategories.add(category);
+    contextMap.set(contentType, nextCategories);
+    map.set(context, contextMap);
   });
+
   return Object.fromEntries(
-    Array.from(map.entries()).map(([contentType, categories]) => [
-      contentType,
-      Array.from(categories).sort((a, b) => a.localeCompare(b)),
+    Array.from(map.entries()).map(([context, contentTypeMap]) => [
+      context,
+      Object.fromEntries(
+        Array.from(contentTypeMap.entries()).map(([contentType, categories]) => [
+          contentType,
+          Array.from(categories).sort((a, b) => a.localeCompare(b)),
+        ]),
+      ),
     ]),
   );
 };
+
+const flattenCategoriesByContentType = (
+  categoriesByContextAndContentType: Record<string, Record<string, string[]>>,
+): Record<string, string[]> =>
+  Object.fromEntries(
+    CONTENT_TYPES.map((contentType) => [
+      contentType,
+      uniqueTags(
+        CONTEXTS.flatMap((context) => categoriesByContextAndContentType[context]?.[contentType] || []),
+      ),
+    ]),
+  );
 
 const deriveBranchTags = (criteria: Criterion[]) => {
   const brands = new Set(BRAND_SEED);
@@ -118,14 +177,18 @@ const mapLegacyCriterionFields = (criterion: Criterion): Criterion => {
   return nextCriterion;
 };
 
-export const buildDefaultTaxonomy = (criteria: Criterion[] = MOCK_CRITERIA): ManagedTaxonomy => ({
-  contexts: [...CONTEXTS],
-  contentTypes: [...CONTENT_TYPES],
-  criteriaCategories: uniqueTags([...DEFAULT_CATEGORIES, ...criteria.map((criterion) => criterion.criteria_category)]),
-  criteriaCategoriesByContentType: deriveCriteriaCategoriesByContentType(criteria),
-  branchTags: deriveBranchTags(criteria),
-  customTagCategories: deriveCustomTagCategories(criteria),
-});
+export const buildDefaultTaxonomy = (criteria: Criterion[] = MOCK_CRITERIA): ManagedTaxonomy => {
+  const criteriaCategoriesByContextAndContentType = deriveCriteriaCategoriesByContextAndContentType(criteria);
+  return {
+    contexts: [...CONTEXTS],
+    contentTypes: [...CONTENT_TYPES],
+    criteriaCategories: uniqueTags(Object.values(criteriaCategoriesByContextAndContentType).flatMap((value) => Object.values(value).flat())),
+    criteriaCategoriesByContextAndContentType,
+    criteriaCategoriesByContentType: flattenCategoriesByContentType(criteriaCategoriesByContextAndContentType),
+    branchTags: deriveBranchTags(criteria),
+    customTagCategories: deriveCustomTagCategories(criteria),
+  };
+};
 
 export const loadRuntimeCriteria = (): Criterion[] => {
   try {
@@ -148,26 +211,51 @@ export const loadManagedTaxonomy = (criteria: Criterion[] = loadRuntimeCriteria(
   try {
     const raw = window.localStorage.getItem(TAXONOMY_STORAGE_KEY);
     if (!raw) return defaults;
-    const parsed = JSON.parse(raw) as Partial<ManagedTaxonomy>;
+    const parsed = JSON.parse(raw) as Partial<ManagedTaxonomy> & {
+      criteriaCategoriesByContentType?: Record<string, unknown>;
+    };
     const contexts = defaults.contexts;
     const contentTypes = defaults.contentTypes;
-    const criteriaCategories = Array.isArray(parsed.criteriaCategories)
-      ? parsed.criteriaCategories.filter((entry): entry is string => typeof entry === "string")
-      : defaults.criteriaCategories;
 
     const rawCriteriaByContentType = parsed.criteriaCategoriesByContentType;
-    const criteriaCategoriesByContentType = contentTypes.reduce<Record<string, string[]>>((acc, contentType) => {
-      const fromParsed =
-        rawCriteriaByContentType &&
-        typeof rawCriteriaByContentType === "object" &&
-        Array.isArray((rawCriteriaByContentType as Record<string, unknown>)[contentType])
-          ? ((rawCriteriaByContentType as Record<string, unknown>)[contentType] as unknown[]).filter(
-              (entry): entry is string => typeof entry === "string",
-            )
-          : defaults.criteriaCategoriesByContentType[contentType] || [];
-      acc[contentType] = uniqueTags(fromParsed);
-      return acc;
+    const rawCriteriaByContextAndContentType = parsed.criteriaCategoriesByContextAndContentType;
+    const criteriaCategoriesByContextAndContentType = contexts.reduce<Record<string, Record<string, string[]>>>((contextAcc, context) => {
+      contextAcc[context] = contentTypes.reduce<Record<string, string[]>>((contentTypeAcc, contentType) => {
+        const fromNewShape =
+          rawCriteriaByContextAndContentType &&
+          typeof rawCriteriaByContextAndContentType === "object" &&
+          typeof (rawCriteriaByContextAndContentType as Record<string, unknown>)[context] === "object" &&
+          Array.isArray(((rawCriteriaByContextAndContentType as Record<string, unknown>)[context] as Record<string, unknown>)[contentType])
+            ? ((((rawCriteriaByContextAndContentType as Record<string, unknown>)[context] as Record<string, unknown>)[contentType] as unknown[]).filter(
+                (entry): entry is string => typeof entry === "string",
+              ))
+            : null;
+
+        const fromLegacyShape =
+          fromNewShape === null &&
+          rawCriteriaByContentType &&
+          typeof rawCriteriaByContentType === "object" &&
+          Array.isArray((rawCriteriaByContentType as Record<string, unknown>)[contentType])
+            ? ((rawCriteriaByContentType as Record<string, unknown>)[contentType] as unknown[]).filter(
+                (entry): entry is string => typeof entry === "string",
+              )
+            : null;
+
+        const fallback = defaults.criteriaCategoriesByContextAndContentType[context]?.[contentType] || [];
+        const parsedValues = fromNewShape ?? fromLegacyShape ?? [];
+        contentTypeAcc[contentType] = uniqueTags([...fallback, ...parsedValues]);
+        return contentTypeAcc;
+      }, {});
+      return contextAcc;
     }, {});
+
+    const criteriaCategories = uniqueTags([
+      ...(Array.isArray(parsed.criteriaCategories)
+        ? parsed.criteriaCategories.filter((entry): entry is string => typeof entry === "string")
+        : []),
+      ...Object.values(criteriaCategoriesByContextAndContentType).flatMap((value) => Object.values(value).flat()),
+    ]);
+    const criteriaCategoriesByContentType = flattenCategoriesByContentType(criteriaCategoriesByContextAndContentType);
 
     const rawBranchTags = parsed.branchTags;
     const branchTags = {
@@ -217,7 +305,8 @@ export const loadManagedTaxonomy = (criteria: Criterion[] = loadRuntimeCriteria(
     return {
       contexts,
       contentTypes,
-      criteriaCategories: uniqueTags(criteriaCategories),
+      criteriaCategories,
+      criteriaCategoriesByContextAndContentType,
       criteriaCategoriesByContentType,
       branchTags,
       customTagCategories,

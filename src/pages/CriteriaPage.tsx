@@ -32,6 +32,13 @@ const getFilterLabel = (selected: Set<string>, options: string[], allLabel: stri
   if (selected.size === 1) return [...selected][0];
   return `${selected.size} selected`;
 };
+const getSampleBucketTitle = (bucket: string) => {
+  if (bucket === "0") return "No Matches";
+  if (bucket === "1") return "Minimal Matches";
+  if (bucket.includes("-")) return "Moderate Matches";
+  if (bucket.endsWith("+")) return "Strong Matches";
+  return `Bucket ${bucket}`;
+};
 
 const CriterionDefinitionsTable = ({ criterion }: { criterion: Criterion }) => {
   if (criterion.criteria_type === "yes-no") {
@@ -56,13 +63,13 @@ const CriterionDefinitionsTable = ({ criterion }: { criterion: Criterion }) => {
         <TableBody>
           <TableRow>
             <TableCell className="py-2 font-medium">Yes</TableCell>
-            <TableCell className="py-2">—</TableCell>
+            <TableCell className="py-2">Criterion Met</TableCell>
             <TableCell className="py-2">{definition.definition_yes || "—"}</TableCell>
             <TableCell className="py-2">{yesExamples || "—"}</TableCell>
           </TableRow>
           <TableRow>
             <TableCell className="py-2 font-medium">No</TableCell>
-            <TableCell className="py-2">—</TableCell>
+            <TableCell className="py-2">Criterion Not Met</TableCell>
             <TableCell className="py-2">{definition.definition_no || "—"}</TableCell>
             <TableCell className="py-2">{noExamples || "—"}</TableCell>
           </TableRow>
@@ -123,7 +130,7 @@ const CriterionDefinitionsTable = ({ criterion }: { criterion: Criterion }) => {
           buckets.map((bucket) => (
             <TableRow key={bucket}>
               <TableCell className="py-2 font-medium">{bucket}</TableCell>
-              <TableCell className="py-2">{definition.bucket_titles?.[bucket] || "—"}</TableCell>
+              <TableCell className="py-2">{definition.bucket_titles?.[bucket]?.trim() || getSampleBucketTitle(bucket)}</TableCell>
               <TableCell className="py-2">{definition.bucket_definitions?.[bucket] || "—"}</TableCell>
               <TableCell className="py-2">{definition.bucket_examples?.[bucket]?.filter(Boolean).join("; ") || "—"}</TableCell>
             </TableRow>
@@ -153,8 +160,8 @@ const CriteriaPage = () => {
   const [criteria, setCriteria] = useState<Criterion[]>(() => loadRuntimeCriteria());
   const [contextOptions] = useState<string[]>(() => loadManagedTaxonomy().contexts);
   const [contentTypeOptions] = useState<string[]>(() => loadManagedTaxonomy().contentTypes);
-  const [criteriaCategoriesByContentType, setCriteriaCategoriesByContentType] = useState<Record<string, string[]>>(
-    () => loadManagedTaxonomy().criteriaCategoriesByContentType,
+  const [criteriaCategoriesByContextAndContentType, setCriteriaCategoriesByContextAndContentType] = useState<Record<string, Record<string, string[]>>>(
+    () => loadManagedTaxonomy().criteriaCategoriesByContextAndContentType,
   );
   const [branchTags, setBranchTags] = useState(() => loadManagedTaxonomy().branchTags);
   const [customTagCategories, setCustomTagCategories] = useState<CustomTagCategory[]>(() => loadManagedTaxonomy().customTagCategories);
@@ -164,8 +171,8 @@ const CriteriaPage = () => {
   const [editingCriterion, setEditingCriterion] = useState<Criterion | null>(null);
 
   const criteriaCategoryOptions = useMemo(
-    () => uniqueTags(Object.values(criteriaCategoriesByContentType).flat()),
-    [criteriaCategoriesByContentType],
+    () => uniqueTags(Object.values(criteriaCategoriesByContextAndContentType).flatMap((value) => Object.values(value).flat())),
+    [criteriaCategoriesByContextAndContentType],
   );
 
   const customFilterCategories = useMemo(
@@ -194,10 +201,21 @@ const CriteriaPage = () => {
       contexts: contextOptions,
       contentTypes: contentTypeOptions,
       criteriaCategories: uniqueTags(criteriaCategoryOptions),
+      criteriaCategoriesByContextAndContentType: Object.fromEntries(
+        contextOptions.map((context) => [
+          context,
+          Object.fromEntries(
+            contentTypeOptions.map((contentType) => [
+              contentType,
+              uniqueTags(criteriaCategoriesByContextAndContentType[context]?.[contentType] || []),
+            ]),
+          ),
+        ]),
+      ),
       criteriaCategoriesByContentType: Object.fromEntries(
         contentTypeOptions.map((contentType) => [
           contentType,
-          uniqueTags(criteriaCategoriesByContentType[contentType] || []),
+          uniqueTags(contextOptions.flatMap((context) => criteriaCategoriesByContextAndContentType[context]?.[contentType] || [])),
         ]),
       ),
       branchTags: {
@@ -209,7 +227,7 @@ const CriteriaPage = () => {
         .map((category) => ({ name: normalizeTag(category.name), tags: uniqueTags(category.tags) }))
         .sort((a, b) => a.name.localeCompare(b.name)),
     });
-  }, [contextOptions, contentTypeOptions, criteriaCategoryOptions, criteriaCategoriesByContentType, branchTags, customTagCategories]);
+  }, [contextOptions, contentTypeOptions, criteriaCategoryOptions, criteriaCategoriesByContextAndContentType, branchTags, customTagCategories]);
 
   const filtered = useMemo(() => {
     return criteria.filter(c => {
@@ -255,12 +273,17 @@ const CriteriaPage = () => {
   ]);
 
   const syncTaxonomyFromCriteria = (items: Criterion[]) => {
-    setCriteriaCategoriesByContentType((prev) => {
-      const next: Record<string, string[]> = { ...prev };
+    setCriteriaCategoriesByContextAndContentType((prev) => {
+      const next: Record<string, Record<string, string[]>> = { ...prev };
       items.forEach((criterion) => {
+        const context = criterion.context;
         const contentType = criterion.content_type;
         const category = criterion.criteria_category;
-        next[contentType] = uniqueTags([...(next[contentType] || []), category]);
+        const existingContextMap = next[context] || {};
+        next[context] = {
+          ...existingContextMap,
+          [contentType]: uniqueTags([...(existingContextMap[contentType] || []), category]),
+        };
       });
       return next;
     });
@@ -323,12 +346,15 @@ const CriteriaPage = () => {
     setCustomTagFilters((prev) => ({ ...prev, [categoryName]: new Set<string>() }));
   };
 
-  const handleAddCategoryForContentType = (contentType: string, category: string) => {
+  const handleAddCategoryForContextAndContentType = (context: string, contentType: string, category: string) => {
     const normalizedCategory = normalizeTag(category);
-    if (!contentType || !normalizedCategory) return;
-    setCriteriaCategoriesByContentType((prev) => ({
+    if (!context || !contentType || !normalizedCategory) return;
+    setCriteriaCategoriesByContextAndContentType((prev) => ({
       ...prev,
-      [contentType]: uniqueTags([...(prev[contentType] || []), normalizedCategory]),
+      [context]: {
+        ...(prev[context] || {}),
+        [contentType]: uniqueTags([...(prev[context]?.[contentType] || []), normalizedCategory]),
+      },
     }));
   };
 
@@ -665,10 +691,10 @@ const CriteriaPage = () => {
         initialCriterion={editingCriterion}
         contextOptions={contextOptions}
         contentTypeOptions={contentTypeOptions}
-        criteriaCategoriesByContentType={criteriaCategoriesByContentType}
+        criteriaCategoriesByContextAndContentType={criteriaCategoriesByContextAndContentType}
         branchTags={branchTags}
         onAddBranchTag={handleAddBranchTag}
-        onAddCategoryForContentType={handleAddCategoryForContentType}
+        onAddCategoryForContextAndContentType={handleAddCategoryForContextAndContentType}
       />
 
       <UploadCriteriaDialog
