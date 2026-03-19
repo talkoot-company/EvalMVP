@@ -17,13 +17,14 @@ interface AddCriterionDialogProps {
   contextOptions: string[];
   contentTypeOptions: string[];
   criteriaCategoriesByContextAndContentType: Record<string, Record<string, string[]>>;
+  criteriaCategoriesByContextBranchAndContentType: Record<string, Record<string, Record<string, string[]>>>;
   branchTags: {
     brands: string[];
     industries: string[];
     marketplaces: string[];
   };
   onAddBranchTag: (branchType: "brands" | "industries" | "marketplaces", tag: string) => void;
-  onAddCategoryForContextAndContentType: (context: string, contentType: string, category: string) => void;
+  onAddCategoryForContextAndContentType: (context: string, contentType: string, category: string, branchTag?: string) => void;
 }
 
 interface ScaleExample {
@@ -34,7 +35,7 @@ interface ScaleExample {
 
 type AddTagTarget =
   | { type: "branch"; branchType: "brands" | "industries" | "marketplaces" }
-  | { type: "category"; context: string; contentType: string };
+  | { type: "category"; context: string; contentType: string; branchTag?: string };
 
 const COUNT_BUCKETS = ["0", "1", "2", "3+"] as const;
 
@@ -56,6 +57,7 @@ export const AddCriterionDialog = ({
   contextOptions,
   contentTypeOptions,
   criteriaCategoriesByContextAndContentType,
+  criteriaCategoriesByContextBranchAndContentType,
   branchTags,
   onAddBranchTag,
   onAddCategoryForContextAndContentType,
@@ -129,6 +131,16 @@ export const AddCriterionDialog = ({
     setBucketDefs({ "0": "", "1": "", "2": "", "3+": "" });
     setBucketExamples({ "0": [""], "1": [""], "2": [""], "3+": [""] });
   };
+
+  const requiresBranch = context === "Brand" || context === "Industry" || context === "Marketplace";
+  const selectedBranchType =
+    context === "Brand"
+      ? "brands"
+      : context === "Industry"
+        ? "industries"
+        : context === "Marketplace"
+          ? "marketplaces"
+          : null;
 
   useEffect(() => {
     if (!open) return;
@@ -206,14 +218,28 @@ export const AddCriterionDialog = ({
     if (!open) return;
     if (context && !contextOptions.includes(context)) setContext("");
     if (contentType && !contentTypeOptions.includes(contentType)) setContentType("");
+    const activeCategories = requiresBranch && branchTag
+      ? criteriaCategoriesByContextBranchAndContentType[context]?.[branchTag]?.[contentType] || []
+      : criteriaCategoriesByContextAndContentType[context]?.[contentType] || [];
     if (
       contentType &&
       category &&
-      !(criteriaCategoriesByContextAndContentType[context]?.[contentType] || []).includes(category)
+      !activeCategories.includes(category)
     ) {
       setCategory("");
     }
-  }, [open, context, contentType, category, contextOptions, contentTypeOptions, criteriaCategoriesByContextAndContentType]);
+  }, [
+    open,
+    context,
+    contentType,
+    category,
+    branchTag,
+    requiresBranch,
+    contextOptions,
+    contentTypeOptions,
+    criteriaCategoriesByContextAndContentType,
+    criteriaCategoriesByContextBranchAndContentType,
+  ]);
 
   const isAddTagValue = (value: string) => value.startsWith("__add_tag__");
 
@@ -243,7 +269,7 @@ export const AddCriterionDialog = ({
       onAddBranchTag(addTagTarget.branchType, tag);
       setBranchTag(tag);
     } else {
-      onAddCategoryForContextAndContentType(addTagTarget.context, addTagTarget.contentType, tag);
+      onAddCategoryForContextAndContentType(addTagTarget.context, addTagTarget.contentType, tag, addTagTarget.branchTag);
       setCategory(tag);
     }
 
@@ -315,15 +341,6 @@ export const AddCriterionDialog = ({
     }));
   };
 
-  const requiresBranch = context === "Brand" || context === "Industry" || context === "Marketplace";
-  const selectedBranchType =
-    context === "Brand"
-      ? "brands"
-      : context === "Industry"
-        ? "industries"
-        : context === "Marketplace"
-          ? "marketplaces"
-          : null;
   const branchLabel =
     selectedBranchType === "brands"
       ? "Brand"
@@ -334,7 +351,9 @@ export const AddCriterionDialog = ({
           : "";
   const branchOptions = selectedBranchType ? branchTags[selectedBranchType] || [] : [];
   const categoryOptions = context && contentType
-    ? criteriaCategoriesByContextAndContentType[context]?.[contentType] || []
+    ? (requiresBranch && branchTag
+      ? criteriaCategoriesByContextBranchAndContentType[context]?.[branchTag]?.[contentType] || []
+      : criteriaCategoriesByContextAndContentType[context]?.[contentType] || [])
     : [];
   const canSubmit =
     !!name.trim() &&
@@ -496,7 +515,9 @@ export const AddCriterionDialog = ({
                     onValueChange={(value) => {
                       const nextContentType = value === "__none__" ? "" : value;
                       const nextCategoryOptions = nextContentType
-                        ? criteriaCategoriesByContextAndContentType[context]?.[nextContentType] || []
+                        ? (requiresBranch && branchTag
+                          ? criteriaCategoriesByContextBranchAndContentType[context]?.[branchTag]?.[nextContentType] || []
+                          : criteriaCategoriesByContextAndContentType[context]?.[nextContentType] || [])
                         : [];
                       setContentType(nextContentType);
                       if (!nextContentType || !nextCategoryOptions.includes(category)) {
@@ -521,7 +542,14 @@ export const AddCriterionDialog = ({
                     disabled={!context || !contentType}
                     onValueChange={(value) => {
                       if (isAddTagValue(value)) {
-                        if (context && contentType) openAddTagDialog({ type: "category", context, contentType });
+                        if (context && contentType) {
+                          openAddTagDialog({
+                            type: "category",
+                            context,
+                            contentType,
+                            branchTag: requiresBranch ? branchTag : undefined,
+                          });
+                        }
                         return;
                       }
                       setCategory(value === "__none__" ? "" : value);
@@ -692,7 +720,7 @@ export const AddCriterionDialog = ({
           <DialogHeader>
             <DialogTitle>
               {addTagTarget.type === "category"
-                ? `Add Category for ${addTagTarget.context} / ${addTagTarget.contentType}`
+                ? `Add Category for ${addTagTarget.context}${addTagTarget.branchTag ? ` / ${addTagTarget.branchTag}` : ""} / ${addTagTarget.contentType}`
                 : `Add ${getAddTagTargetLabel(addTagTarget)} Tag`}
             </DialogTitle>
           </DialogHeader>

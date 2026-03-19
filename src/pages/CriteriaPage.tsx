@@ -219,6 +219,9 @@ const CriteriaPage = () => {
   const [criteriaCategoriesByContextAndContentType, setCriteriaCategoriesByContextAndContentType] = useState<Record<string, Record<string, string[]>>>(
     () => loadManagedTaxonomy().criteriaCategoriesByContextAndContentType,
   );
+  const [criteriaCategoriesByContextBranchAndContentType, setCriteriaCategoriesByContextBranchAndContentType] = useState<Record<string, Record<string, Record<string, string[]>>>>(
+    () => loadManagedTaxonomy().criteriaCategoriesByContextBranchAndContentType,
+  );
   const [branchTags, setBranchTags] = useState(() => loadManagedTaxonomy().branchTags);
   const [customTagCategories, setCustomTagCategories] = useState<CustomTagCategory[]>(() => loadManagedTaxonomy().customTagCategories);
   const [customTagFilters, setCustomTagFilters] = useState<Record<string, Set<string>>>({});
@@ -227,8 +230,14 @@ const CriteriaPage = () => {
   const [editingCriterion, setEditingCriterion] = useState<Criterion | null>(null);
 
   const criteriaCategoryOptions = useMemo(
-    () => uniqueTags(Object.values(criteriaCategoriesByContextAndContentType).flatMap((value) => Object.values(value).flat())),
-    [criteriaCategoriesByContextAndContentType],
+    () =>
+      uniqueTags([
+        ...Object.values(criteriaCategoriesByContextAndContentType).flatMap((value) => Object.values(value).flat()),
+        ...Object.values(criteriaCategoriesByContextBranchAndContentType)
+          .flatMap((branchMap) => Object.values(branchMap))
+          .flatMap((contentMap) => Object.values(contentMap).flat()),
+      ]),
+    [criteriaCategoriesByContextAndContentType, criteriaCategoriesByContextBranchAndContentType],
   );
 
   const customFilterCategories = useMemo(
@@ -268,6 +277,22 @@ const CriteriaPage = () => {
           ),
         ]),
       ),
+      criteriaCategoriesByContextBranchAndContentType: Object.fromEntries(
+        ["Industry", "Marketplace", "Brand"].map((context) => [
+          context,
+          Object.fromEntries(
+            Object.entries(criteriaCategoriesByContextBranchAndContentType[context] || {}).map(([branchTag, contentTypeMap]) => [
+              branchTag,
+              Object.fromEntries(
+                contentTypeOptions.map((contentType) => [
+                  contentType,
+                  uniqueTags(contentTypeMap[contentType] || []),
+                ]),
+              ),
+            ]),
+          ),
+        ]),
+      ),
       criteriaCategoriesByContentType: Object.fromEntries(
         contentTypeOptions.map((contentType) => [
           contentType,
@@ -283,7 +308,7 @@ const CriteriaPage = () => {
         .map((category) => ({ name: normalizeTag(category.name), tags: uniqueTags(category.tags) }))
         .sort((a, b) => a.name.localeCompare(b.name)),
     });
-  }, [contextOptions, contentTypeOptions, criteriaCategoryOptions, criteriaCategoriesByContextAndContentType, branchTags, customTagCategories]);
+  }, [contextOptions, contentTypeOptions, criteriaCategoryOptions, criteriaCategoriesByContextAndContentType, criteriaCategoriesByContextBranchAndContentType, branchTags, customTagCategories]);
 
   const filtered = useMemo(() => {
     return criteria.filter(c => {
@@ -340,6 +365,27 @@ const CriteriaPage = () => {
           ...existingContextMap,
           [contentType]: uniqueTags([...(existingContextMap[contentType] || []), category]),
         };
+      });
+      return next;
+    });
+    setCriteriaCategoriesByContextBranchAndContentType((prev) => {
+      const next: Record<string, Record<string, Record<string, string[]>>> = { ...prev };
+      items.forEach((criterion) => {
+        if (criterion.context === "Universal") return;
+        const context = criterion.context;
+        const contentType = criterion.content_type;
+        const category = criterion.criteria_category;
+        const branchTag = criterion.context === "Brand"
+          ? criterion.brand_tag
+          : criterion.context === "Industry"
+            ? criterion.industry_tag
+            : criterion.context === "Marketplace"
+              ? criterion.marketplace_tag
+              : undefined;
+        if (!branchTag) return;
+        next[context] = next[context] || {};
+        next[context][branchTag] = next[context][branchTag] || {};
+        next[context][branchTag][contentType] = uniqueTags([...(next[context][branchTag][contentType] || []), category]);
       });
       return next;
     });
@@ -402,7 +448,7 @@ const CriteriaPage = () => {
     setCustomTagFilters((prev) => ({ ...prev, [categoryName]: new Set<string>() }));
   };
 
-  const handleAddCategoryForContextAndContentType = (context: string, contentType: string, category: string) => {
+  const handleAddCategoryForContextAndContentType = (context: string, contentType: string, category: string, branchTag?: string) => {
     const normalizedCategory = normalizeTag(category);
     if (!context || !contentType || !normalizedCategory) return;
     setCriteriaCategoriesByContextAndContentType((prev) => ({
@@ -412,6 +458,18 @@ const CriteriaPage = () => {
         [contentType]: uniqueTags([...(prev[context]?.[contentType] || []), normalizedCategory]),
       },
     }));
+    if (branchTag && (context === "Industry" || context === "Marketplace" || context === "Brand")) {
+      setCriteriaCategoriesByContextBranchAndContentType((prev) => ({
+        ...prev,
+        [context]: {
+          ...(prev[context] || {}),
+          [branchTag]: {
+            ...((prev[context] || {})[branchTag] || {}),
+            [contentType]: uniqueTags([...((prev[context] || {})[branchTag]?.[contentType] || []), normalizedCategory]),
+          },
+        },
+      }));
+    }
   };
 
   const handleDeleteCriterion = (id: string) => {
@@ -748,6 +806,7 @@ const CriteriaPage = () => {
         contextOptions={contextOptions}
         contentTypeOptions={contentTypeOptions}
         criteriaCategoriesByContextAndContentType={criteriaCategoriesByContextAndContentType}
+        criteriaCategoriesByContextBranchAndContentType={criteriaCategoriesByContextBranchAndContentType}
         branchTags={branchTags}
         onAddBranchTag={handleAddBranchTag}
         onAddCategoryForContextAndContentType={handleAddCategoryForContextAndContentType}

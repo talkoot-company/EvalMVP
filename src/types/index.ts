@@ -93,14 +93,58 @@ export interface CriterionScore {
 
 export type EvalRunStatus = "pending" | "running" | "completed" | "failed";
 
+export interface EvalRunTaxonomySnapshot {
+  contexts: string[];
+  contentTypes: string[];
+  branchTagsByContext: {
+    Industry: string[];
+    Marketplace: string[];
+    Brand: string[];
+  };
+  categoriesByPath: Record<string, string[]>;
+}
+
+export interface EvalRunScoreNode {
+  id: string;
+  label: string;
+  level: "context" | "branch" | "content_type" | "category" | "criterion";
+  parent_id: string | null;
+  children_ids: string[];
+  raw_points: number;
+  max_points: number;
+  normalized_0_100: number;
+  meta?: {
+    context?: string;
+    branch_tag?: string;
+    content_type?: string;
+    category?: string;
+    criterion_id?: string;
+  };
+}
+
+export interface EvalRunProductResult {
+  product_copy_id: string;
+  overall_score: number | null;
+  category_scores: Record<string, number>;
+  criterion_scores: CriterionScore[];
+  taxonomy_snapshot?: EvalRunTaxonomySnapshot;
+  hierarchical_scores?: Record<string, EvalRunScoreNode>;
+  root_node_ids?: string[];
+}
+
 export interface EvalRun {
   id: string;
+  evaluation_title?: string;
   suite_id: string;
   product_copy_id: string;
   status: EvalRunStatus;
   overall_score: number | null;
   category_scores: Record<string, number>;
   criterion_scores: CriterionScore[];
+  taxonomy_snapshot?: EvalRunTaxonomySnapshot;
+  hierarchical_scores?: Record<string, EvalRunScoreNode>;
+  root_node_ids?: string[];
+  product_results?: EvalRunProductResult[];
   started_at: string;
   completed_at: string | null;
 }

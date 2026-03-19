@@ -20,6 +20,7 @@ export interface ManagedTaxonomy {
   contentTypes: string[];
   criteriaCategories: string[];
   criteriaCategoriesByContextAndContentType: Record<string, Record<string, string[]>>;
+  criteriaCategoriesByContextBranchAndContentType: Record<string, Record<string, Record<string, string[]>>>;
   criteriaCategoriesByContentType: Record<string, string[]>;
   branchTags: {
     brands: string[];
@@ -87,6 +88,13 @@ const deriveCustomTagCategories = (criteria: Criterion[]): CustomTagCategory[] =
 const getSeedCategoriesForPair = (context: string, contentType: string) =>
   CATEGORY_SEED_BY_CONTEXT_AND_CONTENT_TYPE[context]?.[contentType] || DEFAULT_CATEGORIES;
 
+const getCriterionBranchTag = (criterion: Criterion): string => {
+  if (criterion.context === "Brand") return normalizeTag(criterion.brand_tag || criterion.custom_tags?.Brand?.[0] || "");
+  if (criterion.context === "Industry") return normalizeTag(criterion.industry_tag || criterion.custom_tags?.Industry?.[0] || "");
+  if (criterion.context === "Marketplace") return normalizeTag(criterion.marketplace_tag || criterion.custom_tags?.Marketplace?.[0] || "");
+  return "";
+};
+
 const deriveCriteriaCategoriesByContextAndContentType = (
   criteria: Criterion[],
 ): Record<string, Record<string, string[]>> => {
@@ -124,6 +132,55 @@ const deriveCriteriaCategoriesByContextAndContentType = (
       ),
     ]),
   );
+};
+
+const deriveCriteriaCategoriesByContextBranchAndContentType = (
+  criteria: Criterion[],
+  branchTags: { brands: string[]; industries: string[]; marketplaces: string[] },
+): Record<string, Record<string, Record<string, string[]>>> => {
+  const result: Record<string, Record<string, Record<string, string[]>>> = {
+    Industry: {},
+    Marketplace: {},
+    Brand: {},
+  };
+
+  const seedContext = (
+    context: "Industry" | "Marketplace" | "Brand",
+    branches: string[],
+  ) => {
+    branches.forEach((branch) => {
+      result[context][branch] = Object.fromEntries(
+        CONTENT_TYPES.map((contentType) => [
+          contentType,
+          [...getSeedCategoriesForPair(context, contentType)],
+        ]),
+      );
+    });
+  };
+
+  seedContext("Industry", branchTags.industries);
+  seedContext("Marketplace", branchTags.marketplaces);
+  seedContext("Brand", branchTags.brands);
+
+  criteria.forEach((criterion) => {
+    if (criterion.context === "Universal") return;
+    const context = normalizeTag(normalizeContextValue(criterion.context || "")) as "Industry" | "Marketplace" | "Brand";
+    if (!["Industry", "Marketplace", "Brand"].includes(context)) return;
+    const branchTag = getCriterionBranchTag(criterion);
+    const contentType = normalizeTag(criterion.content_type || "");
+    const category = normalizeTag(criterion.criteria_category || "");
+    if (!branchTag || !contentType || !category) return;
+
+    if (!result[context][branchTag]) {
+      result[context][branchTag] = Object.fromEntries(
+        CONTENT_TYPES.map((type) => [type, [...getSeedCategoriesForPair(context, type)]]),
+      );
+    }
+    const existing = result[context][branchTag][contentType] || [];
+    result[context][branchTag][contentType] = uniqueTags([...existing, category]);
+  });
+
+  return result;
 };
 
 const flattenCategoriesByContentType = (
@@ -232,13 +289,16 @@ const mapLegacyCriterionFields = (criterion: Criterion): Criterion => {
 
 export const buildDefaultTaxonomy = (criteria: Criterion[] = MOCK_CRITERIA): ManagedTaxonomy => {
   const criteriaCategoriesByContextAndContentType = deriveCriteriaCategoriesByContextAndContentType(criteria);
+  const branchTags = deriveBranchTags(criteria);
+  const criteriaCategoriesByContextBranchAndContentType = deriveCriteriaCategoriesByContextBranchAndContentType(criteria, branchTags);
   return {
     contexts: [...CONTEXTS],
     contentTypes: [...CONTENT_TYPES],
     criteriaCategories: uniqueTags(Object.values(criteriaCategoriesByContextAndContentType).flatMap((value) => Object.values(value).flat())),
     criteriaCategoriesByContextAndContentType,
+    criteriaCategoriesByContextBranchAndContentType,
     criteriaCategoriesByContentType: flattenCategoriesByContentType(criteriaCategoriesByContextAndContentType),
-    branchTags: deriveBranchTags(criteria),
+    branchTags,
     customTagCategories: deriveCustomTagCategories(criteria),
   };
 };
@@ -266,12 +326,14 @@ export const loadManagedTaxonomy = (criteria: Criterion[] = loadRuntimeCriteria(
     if (!raw) return defaults;
     const parsed = JSON.parse(raw) as Partial<ManagedTaxonomy> & {
       criteriaCategoriesByContentType?: Record<string, unknown>;
+      criteriaCategoriesByContextBranchAndContentType?: Record<string, unknown>;
     };
     const contexts = defaults.contexts;
     const contentTypes = defaults.contentTypes;
 
     const rawCriteriaByContentType = parsed.criteriaCategoriesByContentType;
     const rawCriteriaByContextAndContentType = parsed.criteriaCategoriesByContextAndContentType;
+    const rawCriteriaByContextBranchAndContentType = parsed.criteriaCategoriesByContextBranchAndContentType;
     const criteriaCategoriesByContextAndContentType = contexts.reduce<Record<string, Record<string, string[]>>>((contextAcc, context) => {
       contextAcc[context] = contentTypes.reduce<Record<string, string[]>>((contentTypeAcc, contentType) => {
         const fromNewShape =
@@ -355,11 +417,56 @@ export const loadManagedTaxonomy = (criteria: Criterion[] = loadRuntimeCriteria(
           .sort((a, b) => a.name.localeCompare(b.name))
       : defaults.customTagCategories;
 
+    const contextBranchToSourceKey: Array<{ context: "Industry" | "Marketplace" | "Brand"; source: keyof ManagedTaxonomy["branchTags"] }> = [
+      { context: "Industry", source: "industries" },
+      { context: "Marketplace", source: "marketplaces" },
+      { context: "Brand", source: "brands" },
+    ];
+
+    const criteriaCategoriesByContextBranchAndContentType = contextBranchToSourceKey.reduce<Record<string, Record<string, Record<string, string[]>>>>(
+      (contextAcc, { context, source }) => {
+        const branchValues = branchTags[source] || [];
+        const defaultContextMap = defaults.criteriaCategoriesByContextBranchAndContentType[context] || {};
+        const rawContextMap =
+          rawCriteriaByContextBranchAndContentType &&
+          typeof rawCriteriaByContextBranchAndContentType === "object" &&
+          typeof (rawCriteriaByContextBranchAndContentType as Record<string, unknown>)[context] === "object"
+            ? ((rawCriteriaByContextBranchAndContentType as Record<string, unknown>)[context] as Record<string, unknown>)
+            : {};
+
+        contextAcc[context] = Object.fromEntries(
+          branchValues.map((branchTag) => {
+            const defaultBranchMap = defaultContextMap[branchTag] || {};
+            const rawBranchMap =
+              rawContextMap && typeof rawContextMap[branchTag] === "object"
+                ? (rawContextMap[branchTag] as Record<string, unknown>)
+                : {};
+
+            const contentMap = Object.fromEntries(
+              contentTypes.map((contentType) => {
+                const fromNewShape = Array.isArray(rawBranchMap[contentType])
+                  ? (rawBranchMap[contentType] as unknown[]).filter((entry): entry is string => typeof entry === "string")
+                  : null;
+                const fromLegacyShape = criteriaCategoriesByContextAndContentType[context]?.[contentType] || [];
+                const fallback = defaultBranchMap[contentType] || fromLegacyShape;
+                return [contentType, uniqueTags([...(fallback || []), ...((fromNewShape || []) as string[])])];
+              }),
+            );
+
+            return [branchTag, contentMap];
+          }),
+        );
+        return contextAcc;
+      },
+      { Industry: {}, Marketplace: {}, Brand: {} },
+    );
+
     return {
       contexts,
       contentTypes,
       criteriaCategories,
       criteriaCategoriesByContextAndContentType,
+      criteriaCategoriesByContextBranchAndContentType,
       criteriaCategoriesByContentType,
       branchTags,
       customTagCategories,

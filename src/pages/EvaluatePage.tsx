@@ -21,7 +21,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Play, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Plus, Trash2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CONTENT_TYPES, deriveCategoriesFromCriteria } from "@/config/hierarchy";
-import type { EvalRun, Criterion, ContentType } from "@/types";
+import type { EvalRun, Criterion, ContentType, EvalRunScoreNode } from "@/types";
 import { loadManagedTaxonomy, loadRuntimeCriteria } from "@/data/runtime-taxonomy";
 
 interface ContentEntry {
@@ -30,6 +30,40 @@ interface ContentEntry {
   text: string;
   fileName?: string;
 }
+
+interface HierarchyScoreSource {
+  criterion_scores: EvalRun["criterion_scores"];
+  hierarchical_scores?: Record<string, EvalRunScoreNode>;
+  root_node_ids?: string[];
+}
+
+const CONTEXT_ORDER = ["Universal", "Industry", "Marketplace", "Brand"];
+
+const getBranchTagForCriterion = (criterion: Criterion) => {
+  if (criterion.context === "Industry") return criterion.industry_tag;
+  if (criterion.context === "Marketplace") return criterion.marketplace_tag;
+  if (criterion.context === "Brand") return criterion.brand_tag;
+  return undefined;
+};
+
+const normalizeCriterionToQuartile = (criterion: Criterion | undefined, rawScore: number) => {
+  if (!criterion) return Math.max(0.25, Math.min(1, rawScore));
+  if (criterion.criteria_type === "yes-no") return rawScore >= 1 ? 1 : 0.25;
+  if (criterion.criteria_type === "numerical-scale") {
+    const clamped = Math.max(1, Math.min(4, Math.round(rawScore)));
+    return clamped / 4;
+  }
+  const rounded = Math.round(rawScore);
+  if (rounded <= 0) return 0.25;
+  if (rounded === 1) return 0.5;
+  if (rounded === 2) return 0.75;
+  return 1;
+};
+
+const toWeightTier = (weight: number | undefined) => {
+  const rounded = Math.round(weight ?? 1);
+  return Math.max(1, Math.min(3, rounded));
+};
 
 const EvaluatePage = () => {
   // Suite-based selection
@@ -46,7 +80,8 @@ const EvaluatePage = () => {
   const [importFileName, setImportFileName] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
-  const [expandedHistoryCategories, setExpandedHistoryCategories] = useState<Set<string>>(new Set());
+  const [openHistoryNodesByTree, setOpenHistoryNodesByTree] = useState<Record<string, Set<string>>>({});
+  const [openHistoryProducts, setOpenHistoryProducts] = useState<Record<string, boolean>>({});
   const [selectionMode, setSelectionMode] = useState<string>("suite");
 
   const runtimeCriteria = useMemo(() => loadRuntimeCriteria(), []);
@@ -368,16 +403,517 @@ const EvaluatePage = () => {
     return normalizedScore / 100;
   };
 
-  const toggleHistoryCategory = (runId: string, category: string) => {
-    const key = `${runId}::${category}`;
-    setExpandedHistoryCategories(prev => {
-      const next = new Set(prev);
-      // This set tracks collapsed categories; default state is expanded.
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
+  const criterionById = useMemo(() => {
+    const map = new Map<string, Criterion>();
+    MOCK_CRITERIA.forEach((criterion) => map.set(criterion.id, criterion));
+    allCriteria.forEach((criterion) => map.set(criterion.id, criterion));
+    return map;
+  }, [allCriteria]);
+
+  const buildDefaultOpenTreeNodes = (nodes: Record<string, EvalRunScoreNode>, rootNodeIds: string[]) => {
+    const open = new Set<string>();
+    const visit = (nodeId: string) => {
+      const node = nodes[nodeId];
+      if (!node) return;
+      if (node.level === "context" || node.level === "branch" || node.level === "content_type") {
+        open.add(node.id);
+      }
+      node.children_ids.forEach((childId) => visit(childId));
+    };
+    rootNodeIds.forEach((rootId) => visit(rootId));
+    return open;
+  };
+
+  const getTreeOpenNodes = (treeKey: string, nodes: Record<string, EvalRunScoreNode>, rootNodeIds: string[]) =>
+    openHistoryNodesByTree[treeKey] || buildDefaultOpenTreeNodes(nodes, rootNodeIds);
+
+  const toggleTreeNode = (treeKey: string, nodeId: string, nodes: Record<string, EvalRunScoreNode>, rootNodeIds: string[]) => {
+    setOpenHistoryNodesByTree((prev) => {
+      const base = prev[treeKey] || buildDefaultOpenTreeNodes(nodes, rootNodeIds);
+      const next = new Set(base);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return { ...prev, [treeKey]: next };
     });
   };
+
+  const getLegacyHierarchyForSource = (source: HierarchyScoreSource) => {
+    const nodes: Record<string, EvalRunScoreNode> = {};
+    const rootNodeIds: string[] = [];
+    const addChild = (parentId: string | null, childId: string) => {
+      if (!parentId || !nodes[parentId]) return;
+      if (!nodes[parentId].children_ids.includes(childId)) nodes[parentId].children_ids.push(childId);
+    };
+    const ensureNode = (
+      id: string,
+      label: string,
+      level: EvalRunScoreNode["level"],
+      parentId: string | null,
+      meta?: EvalRunScoreNode["meta"],
+    ) => {
+      if (!nodes[id]) {
+        nodes[id] = {
+          id,
+          label,
+          level,
+          parent_id: parentId,
+          children_ids: [],
+          raw_points: 0,
+          max_points: 0,
+          normalized_0_100: 0,
+          meta,
+        };
+        if (!parentId && !rootNodeIds.includes(id)) rootNodeIds.push(id);
+        addChild(parentId, id);
+      }
+      return nodes[id];
+    };
+
+    source.criterion_scores.forEach((entry) => {
+      const criterion = criterionById.get(entry.criterion_id);
+      if (!criterion) return;
+      const context = criterion.context;
+      const branchTag = getBranchTagForCriterion(criterion);
+      const contentType = criterion.content_type;
+      const category = criterion.criteria_category;
+      const score01 = normalizeCriterionToQuartile(criterion, entry.score);
+      const maxPoints = toWeightTier(criterion.weight);
+      const rawPoints = score01 * maxPoints;
+
+      const contextNodeId = `context:${context}`;
+      ensureNode(contextNodeId, context, "context", null, { context });
+
+      const branchNodeId = context === "Universal" ? null : `branch:${context}:${branchTag || "unknown"}`;
+      if (branchNodeId) ensureNode(branchNodeId, branchTag || "Unknown", "branch", contextNodeId, { context, branch_tag: branchTag || "Unknown" });
+
+      const contentTypeNodeId = `content_type:${context}:${branchTag || ""}:${contentType}`;
+      ensureNode(
+        contentTypeNodeId,
+        contentType,
+        "content_type",
+        branchNodeId || contextNodeId,
+        { context, branch_tag: branchTag, content_type: contentType },
+      );
+
+      const categoryNodeId = `category:${context}:${branchTag || ""}:${contentType}:${category}`;
+      ensureNode(
+        categoryNodeId,
+        category,
+        "category",
+        contentTypeNodeId,
+        { context, branch_tag: branchTag, content_type: contentType, category },
+      );
+
+      const criterionNodeId = `criterion:${context}:${branchTag || ""}:${contentType}:${category}:${criterion.id}`;
+      nodes[criterionNodeId] = {
+        id: criterionNodeId,
+        label: criterion.criteria_name,
+        level: "criterion",
+        parent_id: categoryNodeId,
+        children_ids: [],
+        raw_points: rawPoints,
+        max_points: maxPoints,
+        normalized_0_100: maxPoints > 0 ? (rawPoints / maxPoints) * 100 : 0,
+        meta: { context, branch_tag: branchTag, content_type: contentType, category, criterion_id: criterion.id },
+      };
+      addChild(categoryNodeId, criterionNodeId);
+    });
+
+    const compute = (nodeId: string): { raw: number; max: number } => {
+      const node = nodes[nodeId];
+      if (!node) return { raw: 0, max: 0 };
+      if (node.level === "criterion") return { raw: node.raw_points, max: node.max_points };
+      const totals = node.children_ids.reduce(
+        (acc, childId) => {
+          const childTotals = compute(childId);
+          return { raw: acc.raw + childTotals.raw, max: acc.max + childTotals.max };
+        },
+        { raw: 0, max: 0 },
+      );
+      node.raw_points = totals.raw;
+      node.max_points = totals.max;
+      node.normalized_0_100 = totals.max > 0 ? (totals.raw / totals.max) * 100 : 0;
+      return totals;
+    };
+
+    rootNodeIds.forEach((nodeId) => compute(nodeId));
+    rootNodeIds.sort((a, b) => {
+      const aLabel = nodes[a]?.label || "";
+      const bLabel = nodes[b]?.label || "";
+      const aOrder = CONTEXT_ORDER.indexOf(aLabel);
+      const bOrder = CONTEXT_ORDER.indexOf(bLabel);
+      return (aOrder === -1 ? 999 : aOrder) - (bOrder === -1 ? 999 : bOrder);
+    });
+    return { nodes, rootNodeIds };
+  };
+
+  const getRunHierarchy = (source: HierarchyScoreSource) => {
+    if (source.hierarchical_scores && source.root_node_ids && source.root_node_ids.length > 0) {
+      return { nodes: source.hierarchical_scores, rootNodeIds: source.root_node_ids };
+    }
+    return getLegacyHierarchyForSource(source);
+  };
+
+  const getRunCounts = (nodes: Record<string, EvalRunScoreNode>) =>
+    Object.values(nodes).reduce(
+      (acc, node) => {
+        if (node.level === "context") acc.contexts += 1;
+        if (node.level === "branch") acc.branches += 1;
+        if (node.level === "content_type") acc.contentTypes += 1;
+        if (node.level === "category") acc.categories += 1;
+        if (node.level === "criterion") acc.criteria += 1;
+        return acc;
+      },
+      { contexts: 0, branches: 0, contentTypes: 0, categories: 0, criteria: 0 },
+    );
+
+  const getOutcomeBadgeClass = (normalizedScore: number) => {
+    if (normalizedScore >= 85) return "bg-score-excellent/15 text-score-excellent border border-score-excellent/30 hover:bg-score-excellent/15";
+    if (normalizedScore >= 65) return "bg-score-good/15 text-score-good border border-score-good/30 hover:bg-score-good/15";
+    if (normalizedScore >= 40) return "bg-score-fair/15 text-score-fair border border-score-fair/30 hover:bg-score-fair/15";
+    return "bg-score-poor/15 text-score-poor border border-score-poor/30 hover:bg-score-poor/15";
+  };
+  const renderNormalizedScoreBadge = (score01: number) => (
+    <Badge className={`text-[10px] font-medium min-w-[74px] justify-center tabular-nums ${getOutcomeBadgeClass(score01 * 100)}`}>
+      S: {formatScore01(score01)}
+    </Badge>
+  );
+
+  const toDisplayedScale = (normalizedScore: number) => Math.max(1, Math.min(4, Math.round((normalizedScore / 100) * 4)));
+  const toDisplayedCount = (rawScore: number) => {
+    if (rawScore >= 3) return "3+";
+    if (rawScore <= 0) return "0";
+    return String(Math.round(rawScore));
+  };
+  const formatScore01 = (value: number) => Math.max(0.25, Math.min(1, value)).toFixed(2);
+
+  const renderCriterionBadge = (criterion: Criterion, score: number, normalizedScore: number) => {
+    const label = criterion.criteria_type === "yes-no"
+      ? (score >= 1 ? "Yes" : "No")
+      : criterion.criteria_type === "numerical-count"
+        ? `Count: ${toDisplayedCount(score)}`
+        : `Scale: ${toDisplayedScale(normalizedScore)}`;
+    return (
+      <Badge className={`text-[10px] font-medium min-w-[96px] justify-center tabular-nums ${getOutcomeBadgeClass(normalizedScore)}`}>
+        {label}
+      </Badge>
+    );
+  };
+
+  const renderFallbackCriterionBadge = (normalizedScore: number) => (
+    <Badge className={`text-[10px] font-medium min-w-[96px] justify-center tabular-nums ${getOutcomeBadgeClass(normalizedScore)}`}>
+      Scale: {toDisplayedScale(normalizedScore)}
+    </Badge>
+  );
+
+  const renderNestedTree = (criterionScores: EvalRun["criterion_scores"], nodes: Record<string, EvalRunScoreNode>, nodeId: string, depth = 0): JSX.Element | null => {
+    const node = nodes[nodeId];
+    if (!node) return null;
+
+    if (node.level === "criterion") {
+      const criterion = node.meta?.criterion_id ? criterionById.get(node.meta.criterion_id) : undefined;
+      const criterionScore = criterionScores.find((scoreEntry) => scoreEntry.criterion_id === node.meta?.criterion_id);
+      if (!criterion || !criterionScore) return null;
+      return (
+        <div key={node.id} className="rounded-md border p-2.5 space-y-2 ml-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">{node.label}</span>
+              {renderCriterionBadge(criterion, criterionScore.score, node.normalized_0_100)}
+            </div>
+            <div className="text-xs tabular-nums text-muted-foreground">
+              {node.raw_points.toFixed(2)}/{node.max_points.toFixed(2)} · {Math.round(node.normalized_0_100)}
+            </div>
+          </div>
+          <div className="flex items-start gap-2 text-xs text-muted-foreground">
+            <MessageSquare className="h-3 w-3 mt-0.5 shrink-0" />
+            <span>{criterionScore.reasoning}</span>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div key={node.id} className={depth === 0 ? "space-y-2" : "space-y-2 ml-4"}>
+        <div className="rounded-md border p-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm font-medium">{node.label}</div>
+            <div className="min-w-[220px]">
+              <ScoreBar score={node.normalized_0_100} size="sm" showLabel />
+            </div>
+          </div>
+          <div className="text-[11px] text-muted-foreground tabular-nums mt-1">
+            {node.raw_points.toFixed(2)}/{node.max_points.toFixed(2)} points
+          </div>
+        </div>
+        <div className="space-y-2">
+          {node.children_ids.map((childId) => renderNestedTree(criterionScores, nodes, childId, depth + 1))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderMatrixTree = (nodes: Record<string, EvalRunScoreNode>) => {
+    const levels: Array<{ key: EvalRunScoreNode["level"]; title: string }> = [
+      { key: "context", title: "Context" },
+      { key: "branch", title: "Branch" },
+      { key: "content_type", title: "Content Type" },
+      { key: "category", title: "Category" },
+    ];
+    return (
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+        {levels.map((level) => {
+          const levelNodes = Object.values(nodes).filter((node) => node.level === level.key);
+          return (
+            <div key={level.key} className="rounded-md border p-2 space-y-2">
+              <p className="text-xs font-semibold text-muted-foreground">{level.title}</p>
+              {levelNodes.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No nodes</p>
+              ) : (
+                levelNodes.map((node) => (
+                  <div key={node.id} className="rounded border p-2 space-y-1">
+                    <div className="text-xs font-medium">{node.label}</div>
+                    <ScoreBar score={node.normalized_0_100} size="sm" showLabel />
+                    <div className="text-[11px] text-muted-foreground tabular-nums">
+                      {node.raw_points.toFixed(2)}/{node.max_points.toFixed(2)}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderSectionedTree = (criterionScores: EvalRun["criterion_scores"], nodes: Record<string, EvalRunScoreNode>, rootNodeIds: string[]) => (
+    <div className="space-y-3">
+      {rootNodeIds.map((rootId) => {
+        const root = nodes[rootId];
+        if (!root) return null;
+        return (
+          <Card key={rootId} className="shadow-none border">
+            <CardContent className="p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-sm font-semibold">{root.label}</h4>
+                <div className="w-52">
+                  <ScoreBar score={root.normalized_0_100} size="sm" showLabel />
+                </div>
+              </div>
+              <div className="space-y-2">
+                {root.children_ids.map((childId) => renderNestedTree(criterionScores, nodes, childId, 0))}
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })}
+    </div>
+  );
+
+  const renderVersion1Compact = (
+    criterionScores: EvalRun["criterion_scores"],
+    nodes: Record<string, EvalRunScoreNode>,
+    rootNodeIds: string[],
+    treeKey: string,
+  ) => {
+    const openNodes = getTreeOpenNodes(treeKey, nodes, rootNodeIds);
+    const criterionScoresById = new Map(criterionScores.map((entry) => [entry.criterion_id, entry]));
+    const levelTone: Record<EvalRunScoreNode["level"], string> = {
+      context: "bg-blue-50 text-blue-700 border-blue-200",
+      branch: "bg-indigo-50 text-indigo-700 border-indigo-200",
+      content_type: "bg-violet-50 text-violet-700 border-violet-200",
+      category: "bg-amber-50 text-amber-700 border-amber-200",
+      criterion: "bg-slate-50 text-slate-700 border-slate-200",
+    };
+
+    const renderRows = (nodeId: string, depth: number): JSX.Element | null => {
+      const node = nodes[nodeId];
+      if (!node) return null;
+      const indentPx = Math.min(depth, 5) * 16;
+      const isCriterion = node.level === "criterion";
+      const isExpandable = node.children_ids.length > 0;
+      const isOpen = isExpandable && openNodes.has(node.id);
+      const criterion = node.meta?.criterion_id ? criterionById.get(node.meta.criterion_id) : undefined;
+      const criterionScore = node.meta?.criterion_id ? criterionScoresById.get(node.meta.criterion_id) : undefined;
+      const criterionChildren = node.children_ids
+        .map((childId) => nodes[childId])
+        .filter((child): child is EvalRunScoreNode => Boolean(child && child.level === "criterion"));
+      const nonCriterionChildren = node.children_ids
+        .map((childId) => nodes[childId])
+        .filter((child): child is EvalRunScoreNode => Boolean(child && child.level !== "criterion"));
+
+      return (
+        <div key={`${treeKey}-${node.id}`} className="space-y-1">
+          <div className="grid grid-cols-[auto_minmax(0,1fr)_140px_84px] items-center gap-2 rounded border px-2 py-1" style={{ marginLeft: `${indentPx}px` }}>
+            <button
+              type="button"
+              className="h-6 w-6 inline-flex items-center justify-center rounded border bg-background disabled:opacity-40"
+              onClick={() => isExpandable && toggleTreeNode(treeKey, node.id, nodes, rootNodeIds)}
+              disabled={!isExpandable}
+              aria-label={isOpen ? "Collapse" : "Expand"}
+            >
+              {isExpandable ? (isOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />) : <span className="text-[10px]">•</span>}
+            </button>
+            <div className="min-w-0 flex items-center gap-1.5">
+              <Badge variant="outline" className={`text-[10px] font-normal capitalize ${levelTone[node.level]}`}>
+                {node.level.replace("_", " ")}
+              </Badge>
+              <span className="truncate text-xs font-medium">{node.label}</span>
+              {isExpandable && (
+                <span className="text-[10px] text-muted-foreground">({node.children_ids.length})</span>
+              )}
+              {isCriterion && criterion && criterionScore ? renderCriterionBadge(criterion, criterionScore.score, node.normalized_0_100) : null}
+            </div>
+            <div className="min-w-0">
+              <ScoreBar score={node.normalized_0_100} size="sm" showLabel={false} />
+            </div>
+            <div className="justify-self-end">
+              {renderNormalizedScoreBadge(node.max_points > 0 ? node.raw_points / node.max_points : 0.25)}
+            </div>
+          </div>
+          {isCriterion && criterionScore ? (
+            <div className="ml-9 text-[11px] text-muted-foreground truncate">
+              {criterionScore.reasoning}
+            </div>
+          ) : null}
+          {node.level === "category" && isOpen && criterionChildren.length > 0 ? (
+            <div className="rounded-md border bg-muted/20 divide-y" style={{ marginLeft: `${indentPx + 44}px` }}>
+              {criterionChildren.map((criterionNode) => {
+                const criterionItem = criterionNode.meta?.criterion_id ? criterionById.get(criterionNode.meta.criterion_id) : undefined;
+                const criterionItemScore = criterionNode.meta?.criterion_id ? criterionScoresById.get(criterionNode.meta.criterion_id) : undefined;
+                if (!criterionItemScore) return null;
+                return (
+                  <div key={`${treeKey}-${criterionNode.id}`} className="grid grid-cols-[minmax(0,1fr)_140px_84px] items-center gap-2 px-2 py-1.5">
+                    <div className="min-w-0 grid grid-cols-[auto_minmax(180px,240px)_96px_72px_minmax(0,1fr)] items-center gap-1.5 text-xs">
+                      <Badge variant="outline" className="text-[10px] font-normal capitalize">
+                        Criterion
+                      </Badge>
+                      <span className="font-medium truncate">{criterionNode.label}</span>
+                      <span className="inline-flex items-center">
+                        {criterionItem
+                          ? renderCriterionBadge(criterionItem, criterionItemScore.score, criterionNode.normalized_0_100)
+                          : renderFallbackCriterionBadge(criterionNode.normalized_0_100)}
+                      </span>
+                      <Badge variant="outline" className="text-[10px] font-medium min-w-[62px] justify-center tabular-nums">
+                        Wt: {toWeightTier(criterionItem?.weight ?? criterionNode.max_points)}
+                      </Badge>
+                      <span className="min-w-0 text-muted-foreground truncate">
+                        "{criterionItemScore.reasoning}"
+                      </span>
+                    </div>
+                    <div className="min-w-0">
+                      <ScoreBar score={criterionNode.normalized_0_100} size="sm" showLabel={false} />
+                    </div>
+                    <div className="justify-self-end">
+                      {renderNormalizedScoreBadge(criterionNode.max_points > 0 ? criterionNode.raw_points / criterionNode.max_points : 0.25)}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+          {isExpandable && isOpen && nonCriterionChildren.length > 0 ? (
+            <div className="space-y-1">
+              {nonCriterionChildren.map((child) => renderRows(child.id, depth + 1))}
+            </div>
+          ) : null}
+        </div>
+      );
+    };
+
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-[auto_minmax(0,1fr)_140px_84px] gap-2 px-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+          <span />
+          <span>Evaluation Hierarchy</span>
+          <span />
+          <span className="text-right">Score</span>
+        </div>
+        <div className="space-y-1">
+          {rootNodeIds.map((rootId) => renderRows(rootId, 0))}
+        </div>
+      </div>
+    );
+  };
+
+  const getRunProducts = (run: EvalRun) => {
+    if (run.product_results && run.product_results.length > 0) {
+      return run.product_results.map((result, index) => ({
+        ...result,
+        _key: `${run.id}::${result.product_copy_id}::${index}`,
+      }));
+    }
+    return [
+      {
+        product_copy_id: run.product_copy_id,
+        overall_score: run.overall_score,
+        category_scores: run.category_scores,
+        criterion_scores: run.criterion_scores,
+        hierarchical_scores: run.hierarchical_scores,
+        root_node_ids: run.root_node_ids,
+        _key: `${run.id}::${run.product_copy_id}`,
+      },
+    ];
+  };
+
+  const toggleHistoryProduct = (productKey: string, nextOpen: boolean) => {
+    setOpenHistoryProducts((prev) => ({
+      ...prev,
+      [productKey]: nextOpen,
+    }));
+  };
+
+  const renderVersion1ProductList = (
+    products: Array<ReturnType<typeof getRunProducts>[number]>,
+    listKeyPrefix: string,
+    defaultExpandFirst = false,
+  ) => (
+    <div className="space-y-2 w-full max-w-[1600px] mx-auto">
+      {products.map((product, index) => {
+        const productKey = `${listKeyPrefix}::${product._key}`;
+        const isExpanded = openHistoryProducts[productKey] ?? (defaultExpandFirst && index === 0);
+        const productCopy = MOCK_COPIES.find((candidate) => candidate.id === product.product_copy_id);
+        const productHierarchy = getRunHierarchy(product);
+        const productCounts = getRunCounts(productHierarchy.nodes);
+
+        return (
+          <div key={productKey} className="rounded-md border">
+            <button
+              type="button"
+              onClick={() => toggleHistoryProduct(productKey, !isExpanded)}
+              className="w-full px-3 py-2"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-left min-w-0">
+                  {isExpanded ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+                  <span className="text-base font-semibold truncate">{productCopy?.product_name || product.product_copy_id}</span>
+                  <Badge variant="outline" className="text-[10px]">Criteria: {productCounts.criteria}</Badge>
+                </div>
+                <div className="flex items-center gap-2">
+                  {product.overall_score !== null ? (
+                    <div className="h-9 w-9 rounded-full border-2 border-score-excellent bg-score-excellent/10 text-score-excellent text-sm font-bold tabular-nums flex items-center justify-center">
+                      {Math.round(product.overall_score)}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </button>
+            {isExpanded ? (
+              <div className="px-3 pb-3 pt-1 border-t">
+                {renderVersion1Compact(
+                  product.criterion_scores,
+                  productHierarchy.nodes,
+                  productHierarchy.rootNodeIds,
+                  `${productKey}::tree`,
+                )}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
 
   return (
     <div className="p-6 space-y-6 animate-fade-in">
@@ -748,10 +1284,38 @@ const EvaluatePage = () => {
       {/* Past runs */}
       <div className="space-y-3">
         <h2 className="text-lg font-semibold">Evaluation History</h2>
+        {(() => {
+          const latestCompletedRun = MOCK_RUNS.find((candidate) => candidate.status === "completed");
+          if (!latestCompletedRun) return null;
+          const latestProducts = getRunProducts(latestCompletedRun);
+          return (
+            <Card className="shadow-card">
+              <CardContent className="p-4 space-y-3">
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold">{latestCompletedRun.evaluation_title || "Evaluation Run"}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Latest completed run · {latestProducts.length} product{latestProducts.length === 1 ? "" : "s"}
+                  </p>
+                </div>
+                {renderVersion1ProductList(latestProducts, `${latestCompletedRun.id}::latest-preview`, true)}
+              </CardContent>
+            </Card>
+          );
+        })()}
+
+        <p className="text-xs font-medium text-muted-foreground pt-1">Run Log</p>
         {MOCK_RUNS.map(run => {
-          const copy = MOCK_COPIES.find(c => c.id === run.product_copy_id);
+          const runProducts = getRunProducts(run);
+          const primaryProduct = runProducts[0];
+          const copy = MOCK_COPIES.find(c => c.id === primaryProduct.product_copy_id);
           const suite = MOCK_SUITES.find(s => s.id === run.suite_id);
           const isExpanded = expandedRun === run.id;
+          const { nodes, rootNodeIds } = getRunHierarchy(primaryProduct);
+          const counts = getRunCounts(nodes);
+          const contextScoreChips = rootNodeIds
+            .map((nodeId) => nodes[nodeId])
+            .filter(Boolean)
+            .map((node) => `${node.label}: ${Math.round(node.normalized_0_100)}`);
 
           return (
             <Card key={run.id} className="shadow-card">
@@ -760,12 +1324,29 @@ const EvaluatePage = () => {
                   onClick={() => setExpandedRun(isExpanded ? null : run.id)}
                   className="w-full"
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-start gap-4">
                       {run.overall_score !== null && <ScoreCircle score={run.overall_score} size="sm" />}
-                      <div className="text-left">
-                        <p className="text-sm font-semibold">{copy?.product_name}</p>
-                        <p className="text-xs text-muted-foreground">{suite?.name} · {copy?.content_type}</p>
+                      <div className="text-left space-y-1">
+                        <p className="text-sm font-semibold">{run.evaluation_title || "Evaluation Run"}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {suite?.name} · {runProducts.length} product{runProducts.length === 1 ? "" : "s"} · Primary: {copy?.product_name}
+                        </p>
+                        <div className="flex flex-wrap gap-1.5">
+                          <Badge variant="outline" className="text-[10px]">Products: {runProducts.length}</Badge>
+                          <Badge variant="outline" className="text-[10px]">Contexts: {counts.contexts}</Badge>
+                          <Badge variant="outline" className="text-[10px]">Branches: {counts.branches}</Badge>
+                          <Badge variant="outline" className="text-[10px]">Types: {counts.contentTypes}</Badge>
+                          <Badge variant="outline" className="text-[10px]">Categories: {counts.categories}</Badge>
+                          <Badge variant="outline" className="text-[10px]">Criteria: {counts.criteria}</Badge>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {contextScoreChips.map((chip) => (
+                            <Badge key={`${run.id}-${chip}`} className="text-[10px] bg-muted text-foreground hover:bg-muted">
+                              {chip}
+                            </Badge>
+                          ))}
+                        </div>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
@@ -779,147 +1360,10 @@ const EvaluatePage = () => {
                 </button>
 
                 {isExpanded && run.status === "completed" && (
-                  <div className="mt-4 pt-4 border-t space-y-4 animate-fade-in">
-                    {(() => {
-                      const runCriteriaDetails = run.criterion_scores
-                        .map(cs => ({
-                          cs,
-                          criterion: MOCK_CRITERIA.find(c => c.id === cs.criterion_id),
-                        }))
-                        .filter(detail => !!detail.criterion) as Array<{
-                        cs: EvalRun["criterion_scores"][number];
-                        criterion: Criterion;
-                      }>;
-
-                      const runCategories = [...new Set(runCriteriaDetails.map(detail => detail.criterion.criteria_category))];
-                      const groupedCriteria = runCategories.reduce<Record<string, typeof runCriteriaDetails>>((acc, category) => {
-                        acc[category] = runCriteriaDetails.filter(detail => detail.criterion.criteria_category === category);
-                        return acc;
-                      }, {});
-                      const categoryPointSums = runCategories.reduce<Record<string, number>>((acc, category) => {
-                        const details = groupedCriteria[category] || [];
-                        acc[category] = details.reduce(
-                          (sum, detail) => sum + getCriterionPoints(detail.criterion, detail.cs.score, detail.cs.normalized_score),
-                          0,
-                        );
-                        return acc;
-                      }, {});
-
-                      return (
-                    <div className="space-y-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2">
-                            <h4 className="text-xs font-medium text-muted-foreground">Criteria Categories</h4>
-                            <Badge variant="outline" className="text-[10px]">{runCategories.length}</Badge>
-                          </div>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-7 text-xs"
-                            onClick={() =>
-                              setExpandedHistoryCategories(prev => {
-                                const next = new Set(prev);
-                                const allExpanded = runCategories.every(category => !next.has(`${run.id}::${category}`));
-                                runCategories.forEach(category => {
-                                  const key = `${run.id}::${category}`;
-                                  if (allExpanded) next.add(key);
-                                  else next.delete(key);
-                                });
-                                return next;
-                              })
-                            }
-                          >
-                            {runCategories.every(category => !expandedHistoryCategories.has(`${run.id}::${category}`))
-                              ? "Collapse all"
-                              : "Expand all"}
-                          </Button>
-                        </div>
-                        <div className="space-y-2">
-                          {runCategories.map(category => {
-                            const details = groupedCriteria[category] || [];
-                            const categoryKey = `${run.id}::${category}`;
-                            const isCategoryExpanded = !expandedHistoryCategories.has(categoryKey);
-                            const categoryPoints = categoryPointSums[category] ?? 0;
-                            const categoryMaxPoints = details.length || 1;
-                            const categoryPct = Math.min(100, (categoryPoints / categoryMaxPoints) * 100);
-                            return (
-                              <Collapsible key={categoryKey} open={isCategoryExpanded}>
-                                <div className="flex items-center justify-between py-1.5">
-                                  <div className="flex items-center gap-3">
-                                    <span className="text-sm">{category}</span>
-                                    <div className="flex items-center gap-2">
-                                      <div className="w-24 h-1.5 rounded-full bg-muted overflow-hidden">
-                                        <div
-                                          className="h-full rounded-full bg-score-excellent transition-all duration-700 ease-out"
-                                          style={{ width: `${categoryPct}%` }}
-                                        />
-                                      </div>
-                                      <span className="text-sm font-semibold text-score-excellent tabular-nums">
-                                        {categoryPoints.toFixed(2).replace(/\.00$/, "")}
-                                      </span>
-                                    </div>
-                                  </div>
-                                  <CollapsibleTrigger asChild>
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-7 w-7"
-                                      onClick={() => toggleHistoryCategory(run.id, category)}
-                                    >
-                                      {isCategoryExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                                    </Button>
-                                  </CollapsibleTrigger>
-                                </div>
-                                <CollapsibleContent className="space-y-2 pl-4 pb-2">
-                                  {details.map(({ cs, criterion }) => (
-                                    <div key={cs.criterion_id} className="rounded-md border p-2.5 space-y-2">
-                                      {(() => {
-                                        const points = getCriterionPoints(criterion, cs.score, cs.normalized_score);
-                                        return (
-                                      <div className="flex items-center justify-between gap-3">
-                                        <div className="flex items-center gap-2">
-                                          <span className="text-sm font-medium">{criterion.criteria_name}</span>
-                                          {criterion.criteria_type === "yes-no" ? (
-                                            <Badge className="text-[10px] font-medium bg-score-excellent/15 text-score-excellent border border-score-excellent/30 hover:bg-score-excellent/15">
-                                              {formatCriterionScore(criterion, cs.score)}
-                                            </Badge>
-                                          ) : criterion.criteria_type === "numerical-count" ? (
-                                            <Badge className="text-[10px] font-medium bg-info/15 text-info border border-info/30 hover:bg-info/15">
-                                              {formatCriterionScore(criterion, cs.score)}
-                                            </Badge>
-                                          ) : criterion.criteria_type === "numerical-scale" ? (
-                                            <Badge className="text-[10px] font-medium bg-score-good/15 text-score-good border border-score-good/30 hover:bg-score-good/15">
-                                              {formatCriterionScore(criterion, cs.score)}
-                                            </Badge>
-                                          ) : (
-                                            <>
-                                              <CriteriaTypeBadge type={criterion.criteria_type} />
-                                              <Badge variant="outline" className="text-[10px]">
-                                                {formatCriterionScore(criterion, cs.score)}
-                                              </Badge>
-                                            </>
-                                          )}
-                                        </div>
-                                        <div className="flex h-11 w-11 items-center justify-center rounded-full border-2 border-score-excellent bg-score-excellent/10 text-score-excellent text-sm font-bold tabular-nums">
-                                          {points.toFixed(2).replace(/\.00$/, "")}
-                                        </div>
-                                      </div>
-                                        );
-                                      })()}
-                                      <div className="flex items-start gap-2 text-xs text-muted-foreground">
-                                        <MessageSquare className="h-3 w-3 mt-0.5 shrink-0" />
-                                        <span>{cs.reasoning}</span>
-                                      </div>
-                                    </div>
-                                  ))}
-                                </CollapsibleContent>
-                              </Collapsible>
-                            );
-                          })}
-                        </div>
-                    </div>
-                      );
-                    })()}
+                  <div className="mt-4 pt-4 border-t space-y-3 animate-fade-in">
+                    <Card className="border-dashed shadow-none">
+                      <CardContent>{renderVersion1ProductList(runProducts, `${run.id}::run-v1`)}</CardContent>
+                    </Card>
                   </div>
                 )}
               </CardContent>
