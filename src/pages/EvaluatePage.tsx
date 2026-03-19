@@ -1021,12 +1021,151 @@ const EvaluatePage = () => {
     );
   };
 
+  const buildAllProductsAggregate = (products: Array<ReturnType<typeof getRunProducts>[number]>) => {
+    if (products.length <= 1) return null;
+
+    const nodeMap: Record<string, EvalRunScoreNode> = {};
+    const rootNodeOrder: string[] = [];
+    const criterionAccumulator = new Map<
+      string,
+      { scoreTotal: number; normalizedTotal: number; count: number }
+    >();
+
+    products.forEach((product) => {
+      const hierarchy = getRunHierarchy(product);
+      hierarchy.rootNodeIds.forEach((rootId) => {
+        if (!rootNodeOrder.includes(rootId)) rootNodeOrder.push(rootId);
+      });
+
+      Object.values(hierarchy.nodes).forEach((node) => {
+        const existing = nodeMap[node.id];
+        if (!existing) {
+          nodeMap[node.id] = {
+            ...node,
+            children_ids: [...node.children_ids],
+            raw_points: node.raw_points,
+            max_points: node.max_points,
+            normalized_0_100: 0,
+          };
+        } else {
+          existing.raw_points += node.raw_points;
+          existing.max_points += node.max_points;
+        }
+      });
+
+      product.criterion_scores.forEach((entry) => {
+        const existing = criterionAccumulator.get(entry.criterion_id);
+        if (!existing) {
+          criterionAccumulator.set(entry.criterion_id, {
+            scoreTotal: entry.score,
+            normalizedTotal: entry.normalized_score,
+            count: 1,
+          });
+          return;
+        }
+        existing.scoreTotal += entry.score;
+        existing.normalizedTotal += entry.normalized_score;
+        existing.count += 1;
+      });
+    });
+
+    Object.values(nodeMap).forEach((node) => {
+      node.normalized_0_100 = node.max_points > 0 ? (node.raw_points / node.max_points) * 100 : 0;
+    });
+
+    const aggregatedCriterionScores: EvalRun["criterion_scores"] = Array.from(criterionAccumulator.entries()).map(
+      ([criterionId, values]) => {
+        const criterion = criterionById.get(criterionId);
+        const avgNormalized = values.count > 0 ? values.normalizedTotal / values.count : 0;
+        let averagedScore = values.count > 0 ? values.scoreTotal / values.count : 0;
+        if (criterion?.criteria_type === "yes-no") averagedScore = avgNormalized >= 62.5 ? 1 : 0;
+        if (criterion?.criteria_type === "numerical-scale") averagedScore = Math.max(1, Math.min(4, Math.round(avgNormalized / 25)));
+        if (criterion?.criteria_type === "numerical-count") averagedScore = Math.max(0, Math.min(3, Math.round(avgNormalized / 25) - 1));
+        return {
+          criterion_id: criterionId,
+          score: averagedScore,
+          normalized_score: avgNormalized,
+          reasoning: `Average across ${products.length} products in this batch.`,
+        };
+      },
+    );
+
+    const rootTotals = rootNodeOrder.reduce(
+      (acc, rootId) => {
+        const rootNode = nodeMap[rootId];
+        if (!rootNode) return acc;
+        return { raw: acc.raw + rootNode.raw_points, max: acc.max + rootNode.max_points };
+      },
+      { raw: 0, max: 0 },
+    );
+    const overallScore = rootTotals.max > 0 ? (rootTotals.raw / rootTotals.max) * 100 : null;
+
+    return {
+      product_copy_id: "all-products",
+      overall_score: overallScore,
+      criterion_scores: aggregatedCriterionScores,
+      hierarchical_scores: nodeMap,
+      root_node_ids: rootNodeOrder,
+    };
+  };
+
   const renderVersion1ProductList = (
     products: Array<ReturnType<typeof getRunProducts>[number]>,
     listKeyPrefix: string,
     defaultExpandFirst = false,
   ) => (
     <div className="space-y-2 w-full max-w-[1600px] mx-auto">
+      {(() => {
+        const aggregate = buildAllProductsAggregate(products);
+        if (!aggregate) return null;
+        const aggregateKey = `${listKeyPrefix}::all-products`;
+        const isExpanded = openHistoryProducts[aggregateKey] ?? defaultExpandFirst;
+        const aggregateHierarchy = getRunHierarchy(aggregate);
+        return (
+          <div key={aggregateKey} className="rounded-md border">
+            <button
+              type="button"
+              onClick={() => toggleHistoryProduct(aggregateKey, !isExpanded)}
+              className="w-full px-3 py-2"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-left min-w-0">
+                  {isExpanded ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+                  <span className="text-base font-semibold truncate">All Products</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    aria-label="Download All Products aggregate"
+                    title="Download"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <Download className="h-4 w-4 text-muted-foreground" />
+                  </Button>
+                  {aggregate.overall_score !== null ? (
+                    <div className="h-9 w-9 rounded-full border-2 border-score-excellent bg-score-excellent/10 text-score-excellent text-sm font-bold tabular-nums flex items-center justify-center">
+                      {Math.round(aggregate.overall_score)}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </button>
+            {isExpanded ? (
+              <div className="px-3 pb-3 pt-1 border-t">
+                {renderVersion1Compact(
+                  aggregate.criterion_scores,
+                  aggregateHierarchy.nodes,
+                  aggregateHierarchy.rootNodeIds,
+                  `${aggregateKey}::tree`,
+                )}
+              </div>
+            ) : null}
+          </div>
+        );
+      })()}
       {products.map((product, index) => {
         const productKey = `${listKeyPrefix}::${product._key}`;
         const isExpanded = openHistoryProducts[productKey] ?? (defaultExpandFirst && index === 0);
