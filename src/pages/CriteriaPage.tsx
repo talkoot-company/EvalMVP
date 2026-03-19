@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Search, Plus, Trash2, Pencil, Upload, ChevronDown } from "lucide-react";
+import { Search, Plus, Trash2, Pencil, Upload, ChevronDown, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { Criterion, CustomTagCategory } from "@/types";
 import { CRITERIA_TYPES } from "@/config/hierarchy";
@@ -27,10 +27,56 @@ const normalizeTag = (value: string) => value.trim().replace(/\s+/g, " ");
 
 const uniqueTags = (values: string[]) => Array.from(new Set(values.map(normalizeTag).filter(Boolean))).sort((a, b) => a.localeCompare(b));
 const isAllSelected = (selected: Set<string>, options: string[]) => selected.size === 0 || selected.size === options.length;
-const getFilterLabel = (selected: Set<string>, options: string[], allLabel: string) => {
-  if (isAllSelected(selected, options)) return allLabel;
-  if (selected.size === 1) return [...selected][0];
-  return `${selected.size} selected`;
+const renderFilterTriggerValue = (
+  selected: Set<string>,
+  options: string[],
+  allLabel: string,
+  labelsByValue?: Record<string, string>,
+  onRemove?: (value: string) => void,
+) => {
+  if (isAllSelected(selected, options)) {
+    return <span className="text-sm">{allLabel}</span>;
+  }
+  const orderedSelected = options.filter((option) => selected.has(option));
+  return (
+    <div className="flex flex-wrap items-center gap-1 whitespace-normal max-w-full">
+      {orderedSelected.map((value) => (
+        <Badge key={`selected-${value}`} variant="secondary" className="h-5 text-[10px] font-medium pr-1 shrink-0">
+          <span>{labelsByValue?.[value] || value}</span>
+          {onRemove ? (
+            <span
+              role="button"
+              tabIndex={0}
+              className="ml-1 inline-flex items-center justify-center rounded-sm hover:bg-black/10"
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onRemove(value);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onRemove(value);
+                }
+              }}
+              aria-label={`Remove ${labelsByValue?.[value] || value}`}
+            >
+              <X className="h-3 w-3" />
+            </span>
+          ) : null}
+        </Badge>
+      ))}
+    </div>
+  );
 };
 const EXAMPLES_PREVIEW_LENGTH = 70;
 const COUNT_BUCKETS = ["0", "1", "2", "3+"] as const;
@@ -224,6 +270,10 @@ const CriteriaPage = () => {
   );
   const [branchTags, setBranchTags] = useState(() => loadManagedTaxonomy().branchTags);
   const [customTagCategories, setCustomTagCategories] = useState<CustomTagCategory[]>(() => loadManagedTaxonomy().customTagCategories);
+  const criteriaTypeLabelMap = useMemo(
+    () => Object.fromEntries(CRITERIA_TYPES.map((type) => [type.value, type.label])),
+    [],
+  );
   const [customTagFilters, setCustomTagFilters] = useState<Record<string, Set<string>>>({});
   const [addOpen, setAddOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -527,7 +577,7 @@ const CriteriaPage = () => {
       {/* Filters */}
       <div className="space-y-3">
         <div className="space-y-1 max-w-2xl">
-          <p className="text-xs font-medium text-muted-foreground">Search</p>
+          <p className="text-[11px] font-semibold text-foreground">Search</p>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
@@ -539,14 +589,16 @@ const CriteriaPage = () => {
           </div>
         </div>
 
-        <div className="flex items-end gap-3 overflow-x-auto pb-1 whitespace-nowrap">
-        <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground">Context</p>
+        <div className="flex flex-wrap items-start gap-3">
+        <div className="min-w-[208px]">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="w-40 justify-between font-normal">
-                {getFilterLabel(contextFilter, contextOptions, "All Contexts")}
-                <ChevronDown className="h-4 w-4 opacity-60" />
+              <Button variant="outline" className="w-52 min-h-12 h-auto py-2 justify-between font-normal items-start">
+                <span className="min-w-0 flex-1 text-left space-y-1">
+                  <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Context</span>
+                  {renderFilterTriggerValue(contextFilter, contextOptions, "All Contexts", undefined, (value) => toggleFilterValue(value, setContextFilter))}
+                </span>
+                <ChevronDown className="h-4 w-4 opacity-60 mt-3" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-56">
@@ -561,13 +613,21 @@ const CriteriaPage = () => {
           </DropdownMenu>
         </div>
 
-        <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground">Score Type</p>
+        <div className="min-w-[208px]">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="w-40 justify-between font-normal">
-                {getFilterLabel(typeFilter, CRITERIA_TYPES.map((ct) => ct.value), "All Types")}
-                <ChevronDown className="h-4 w-4 opacity-60" />
+              <Button variant="outline" className="w-52 min-h-12 h-auto py-2 justify-between font-normal items-start">
+                <span className="min-w-0 flex-1 text-left space-y-1">
+                  <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Score Type</span>
+                  {renderFilterTriggerValue(
+                    typeFilter,
+                    CRITERIA_TYPES.map((ct) => ct.value),
+                    "All Types",
+                    criteriaTypeLabelMap,
+                    (value) => toggleFilterValue(value, setTypeFilter),
+                  )}
+                </span>
+                <ChevronDown className="h-4 w-4 opacity-60 mt-3" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-56">
@@ -582,13 +642,15 @@ const CriteriaPage = () => {
           </DropdownMenu>
         </div>
 
-        <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground">Content Type</p>
+        <div className="min-w-[208px]">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="w-40 justify-between font-normal">
-                {getFilterLabel(contentTypeFilter, contentTypeOptions, "All Content")}
-                <ChevronDown className="h-4 w-4 opacity-60" />
+              <Button variant="outline" className="w-52 min-h-12 h-auto py-2 justify-between font-normal items-start">
+                <span className="min-w-0 flex-1 text-left space-y-1">
+                  <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Content Type</span>
+                  {renderFilterTriggerValue(contentTypeFilter, contentTypeOptions, "All Content", undefined, (value) => toggleFilterValue(value, setContentTypeFilter))}
+                </span>
+                <ChevronDown className="h-4 w-4 opacity-60 mt-3" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-56">
@@ -603,13 +665,15 @@ const CriteriaPage = () => {
           </DropdownMenu>
         </div>
 
-        <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground">Category</p>
+        <div className="min-w-[224px]">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="w-48 justify-between font-normal">
-                {getFilterLabel(categoryFilter, criteriaCategoryOptions, "All Categories")}
-                <ChevronDown className="h-4 w-4 opacity-60" />
+              <Button variant="outline" className="w-56 min-h-12 h-auto py-2 justify-between font-normal items-start">
+                <span className="min-w-0 flex-1 text-left space-y-1">
+                  <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Category</span>
+                  {renderFilterTriggerValue(categoryFilter, criteriaCategoryOptions, "All Categories", undefined, (value) => toggleFilterValue(value, setCategoryFilter))}
+                </span>
+                <ChevronDown className="h-4 w-4 opacity-60 mt-3" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-64">
@@ -624,13 +688,15 @@ const CriteriaPage = () => {
           </DropdownMenu>
         </div>
 
-        <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground">Brand</p>
+        <div className="min-w-[208px]">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="w-44 justify-between font-normal">
-                {getFilterLabel(brandFilter, branchTags.brands, "All Brands")}
-                <ChevronDown className="h-4 w-4 opacity-60" />
+              <Button variant="outline" className="w-52 min-h-12 h-auto py-2 justify-between font-normal items-start">
+                <span className="min-w-0 flex-1 text-left space-y-1">
+                  <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Brand</span>
+                  {renderFilterTriggerValue(brandFilter, branchTags.brands, "All Brands", undefined, (value) => toggleFilterValue(value, setBrandFilter))}
+                </span>
+                <ChevronDown className="h-4 w-4 opacity-60 mt-3" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-56">
@@ -645,13 +711,15 @@ const CriteriaPage = () => {
           </DropdownMenu>
         </div>
 
-        <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground">Industry</p>
+        <div className="min-w-[208px]">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="w-44 justify-between font-normal">
-                {getFilterLabel(industryFilter, branchTags.industries, "All Industries")}
-                <ChevronDown className="h-4 w-4 opacity-60" />
+              <Button variant="outline" className="w-52 min-h-12 h-auto py-2 justify-between font-normal items-start">
+                <span className="min-w-0 flex-1 text-left space-y-1">
+                  <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Industry</span>
+                  {renderFilterTriggerValue(industryFilter, branchTags.industries, "All Industries", undefined, (value) => toggleFilterValue(value, setIndustryFilter))}
+                </span>
+                <ChevronDown className="h-4 w-4 opacity-60 mt-3" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-64">
@@ -666,13 +734,15 @@ const CriteriaPage = () => {
           </DropdownMenu>
         </div>
 
-        <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground">Marketplace</p>
+        <div className="min-w-[208px]">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="w-44 justify-between font-normal">
-                {getFilterLabel(marketplaceFilter, branchTags.marketplaces, "All Marketplaces")}
-                <ChevronDown className="h-4 w-4 opacity-60" />
+              <Button variant="outline" className="w-52 min-h-12 h-auto py-2 justify-between font-normal items-start">
+                <span className="min-w-0 flex-1 text-left space-y-1">
+                  <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Marketplace</span>
+                  {renderFilterTriggerValue(marketplaceFilter, branchTags.marketplaces, "All Marketplaces", undefined, (value) => toggleFilterValue(value, setMarketplaceFilter))}
+                </span>
+                <ChevronDown className="h-4 w-4 opacity-60 mt-3" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-56">
@@ -687,13 +757,21 @@ const CriteriaPage = () => {
           </DropdownMenu>
         </div>
         {customFilterCategories.map((customCategory) => (
-          <div key={`filter-${customCategory.name}`} className="space-y-1">
-            <p className="text-xs font-medium text-muted-foreground">{customCategory.name}</p>
+          <div key={`filter-${customCategory.name}`} className="min-w-[224px]">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" className="w-48 justify-between font-normal">
-                  {getFilterLabel(customTagFilters[customCategory.name] || new Set<string>(), customCategory.tags, `All ${customCategory.name}`)}
-                  <ChevronDown className="h-4 w-4 opacity-60" />
+                <Button variant="outline" className="w-56 min-h-12 h-auto py-2 justify-between font-normal items-start">
+                  <span className="min-w-0 flex-1 text-left space-y-1">
+                    <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{customCategory.name}</span>
+                    {renderFilterTriggerValue(
+                      customTagFilters[customCategory.name] || new Set<string>(),
+                      customCategory.tags,
+                      `All ${customCategory.name}`,
+                      undefined,
+                      (value) => toggleCustomFilterValue(customCategory.name, value),
+                    )}
+                  </span>
+                  <ChevronDown className="h-4 w-4 opacity-60 mt-3" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent className="w-64">
@@ -719,7 +797,7 @@ const CriteriaPage = () => {
             </DropdownMenu>
           </div>
         ))}
-        <span className="text-xs text-muted-foreground">
+        <span className="text-xs text-muted-foreground self-end pb-1">
           {filtered.length} of {criteria.length} criteria
         </span>
         </div>

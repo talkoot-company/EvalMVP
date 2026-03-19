@@ -97,6 +97,7 @@ const EvaluatePage = () => {
   const [historyTitleQuery, setHistoryTitleQuery] = useState("");
   const [historyBrandFilter, setHistoryBrandFilter] = useState("all");
   const [historySuiteFilter, setHistorySuiteFilter] = useState("all");
+  const [historySortBy, setHistorySortBy] = useState<"date_desc" | "date_asc" | "title_asc" | "title_desc">("date_desc");
   const [isNewEvaluationRunOpen, setIsNewEvaluationRunOpen] = useState(true);
   const [selectionMode, setSelectionMode] = useState<string>("suite");
 
@@ -1252,8 +1253,19 @@ const EvaluatePage = () => {
         const suiteMatches = historySuiteFilter === "all" || run.suite_id === historySuiteFilter;
         return titleMatches && brandMatches && suiteMatches;
       })
-      .sort((a, b) => new Date(b.completed_at || b.started_at).getTime() - new Date(a.completed_at || a.started_at).getTime());
-  }, [historyTitleQuery, historyBrandFilter, historySuiteFilter]);
+      .sort((a, b) => {
+        if (historySortBy === "date_desc") {
+          return new Date(b.completed_at || b.started_at).getTime() - new Date(a.completed_at || a.started_at).getTime();
+        }
+        if (historySortBy === "date_asc") {
+          return new Date(a.completed_at || a.started_at).getTime() - new Date(b.completed_at || b.started_at).getTime();
+        }
+        const titleA = (a.evaluation_title || "").toLowerCase();
+        const titleB = (b.evaluation_title || "").toLowerCase();
+        if (historySortBy === "title_asc") return titleA.localeCompare(titleB);
+        return titleB.localeCompare(titleA);
+      });
+  }, [historyTitleQuery, historyBrandFilter, historySuiteFilter, historySortBy]);
 
   return (
     <div className="p-6 space-y-6 animate-fade-in">
@@ -1699,7 +1711,7 @@ const EvaluatePage = () => {
       <div className="space-y-3">
         <h2 className="text-lg font-semibold">Evaluation History</h2>
         <Card className="shadow-card">
-          <CardContent className="p-3 grid grid-cols-1 md:grid-cols-3 gap-2">
+          <CardContent className="p-3 grid grid-cols-1 md:grid-cols-4 gap-2">
             <Input
               className="h-9"
               placeholder="Search evaluation title"
@@ -1730,6 +1742,17 @@ const EvaluatePage = () => {
                     {suite.name}
                   </SelectItem>
                 ))}
+              </SelectContent>
+            </Select>
+            <Select value={historySortBy} onValueChange={(value) => setHistorySortBy(value as "date_desc" | "date_asc" | "title_asc" | "title_desc")}>
+              <SelectTrigger className="h-9">
+                <SelectValue placeholder="Sort by" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="date_desc">Date: Most Recent to Oldest</SelectItem>
+                <SelectItem value="date_asc">Date: Oldest to Most Recent</SelectItem>
+                <SelectItem value="title_asc">Title: A to Z</SelectItem>
+                <SelectItem value="title_desc">Title: Z to A</SelectItem>
               </SelectContent>
             </Select>
           </CardContent>
