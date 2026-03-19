@@ -31,6 +31,9 @@ import type { EvalSuite } from "@/types";
 import { loadManagedTaxonomy, loadRuntimeCriteria } from "@/data/runtime-taxonomy";
 import { loadRuntimeSuites, saveRuntimeSuites } from "@/data/runtime-suites";
 
+const areSetsEqual = (left: Set<string>, right: Set<string>) =>
+  left.size === right.size && [...left].every((value) => right.has(value));
+
 const SuitesPage = () => {
   const [suites, setSuites] = useState<EvalSuite[]>(() => loadRuntimeSuites());
   const runtimeCriteria = useMemo(() => loadRuntimeCriteria(), []);
@@ -143,8 +146,10 @@ const SuitesPage = () => {
     if (!newSuiteOpen) return;
 
     if (!editingSuiteId) {
-      setSelectedCategories(new Set(availableCategories));
-      setSelectedCriteriaIds(new Set(filteredCriteria.map(c => c.id)));
+      const allCategories = new Set(availableCategories);
+      const allCriteria = new Set(filteredCriteria.map(c => c.id));
+      if (!areSetsEqual(selectedCategories, allCategories)) setSelectedCategories(allCategories);
+      if (!areSetsEqual(selectedCriteriaIds, allCriteria)) setSelectedCriteriaIds(allCriteria);
       return;
     }
 
@@ -160,9 +165,9 @@ const SuitesPage = () => {
       [...selectedCriteriaIds].filter(id => allowedCriteriaIds.has(id)),
     );
 
-    setSelectedCategories(nextCategories);
-    setSelectedCriteriaIds(nextCriteriaIds);
-  }, [availableCategories, filteredCriteria]);
+    if (!areSetsEqual(selectedCategories, nextCategories)) setSelectedCategories(nextCategories);
+    if (!areSetsEqual(selectedCriteriaIds, nextCriteriaIds)) setSelectedCriteriaIds(nextCriteriaIds);
+  }, [newSuiteOpen, editingSuiteId, availableCategories, filteredCriteria, selectedCategories, selectedCriteriaIds]);
 
   useEffect(() => {
     saveRuntimeSuites(suites);
