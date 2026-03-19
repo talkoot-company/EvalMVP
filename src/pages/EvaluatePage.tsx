@@ -1,7 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { MOCK_RUNS, MOCK_COPIES, MOCK_SUITES, MOCK_CRITERIA } from "@/data/mock-data";
-import { StatusBadge } from "@/components/StatusBadge";
-import { ScoreBar, ScoreCircle } from "@/components/ScoreDisplay";
+import { ScoreBar } from "@/components/ScoreDisplay";
 import { CriteriaTypeBadge } from "@/components/CriteriaTypeBadge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -18,7 +17,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Play, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Plus, Trash2 } from "lucide-react";
+import { Play, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Plus, Trash2, Download } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CONTENT_TYPES, deriveCategoriesFromCriteria } from "@/config/hierarchy";
 import type { EvalRun, Criterion, ContentType, EvalRunScoreNode } from "@/types";
@@ -29,6 +28,13 @@ interface ContentEntry {
   contentType: ContentType;
   text: string;
   fileName?: string;
+}
+
+interface PasteProductDraft {
+  id: number;
+  name: string;
+  contentEntries: ContentEntry[];
+  isExpanded: boolean;
 }
 
 interface HierarchyScoreSource {
@@ -72,16 +78,26 @@ const EvaluatePage = () => {
   const [runBrand, setRunBrand] = useState("");
   const [copySource, setCopySource] = useState<"import" | "paste">("paste");
   const [customCopyName, setCustomCopyName] = useState("");
-  const [contentEntries, setContentEntries] = useState<ContentEntry[]>([
-    { id: 1, contentType: "Description", text: "" },
+  const [pasteProducts, setPasteProducts] = useState<PasteProductDraft[]>([
+    {
+      id: 1,
+      name: "",
+      isExpanded: true,
+      contentEntries: [{ id: 1, contentType: "Description", text: "" }],
+    },
   ]);
+  const [nextPasteProductId, setNextPasteProductId] = useState(2);
   const [nextContentEntryId, setNextContentEntryId] = useState(2);
   const [importedCopyText, setImportedCopyText] = useState("");
   const [importFileName, setImportFileName] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
-  const [expandedRun, setExpandedRun] = useState<string | null>(null);
   const [openHistoryNodesByTree, setOpenHistoryNodesByTree] = useState<Record<string, Set<string>>>({});
   const [openHistoryProducts, setOpenHistoryProducts] = useState<Record<string, boolean>>({});
+  const [openRunInputByRun, setOpenRunInputByRun] = useState<Record<string, boolean>>({});
+  const [historyTitleQuery, setHistoryTitleQuery] = useState("");
+  const [historyBrandFilter, setHistoryBrandFilter] = useState("all");
+  const [historySuiteFilter, setHistorySuiteFilter] = useState("all");
+  const [isNewEvaluationRunOpen, setIsNewEvaluationRunOpen] = useState(true);
   const [selectionMode, setSelectionMode] = useState<string>("suite");
 
   const runtimeCriteria = useMemo(() => loadRuntimeCriteria(), []);
@@ -310,8 +326,29 @@ const EvaluatePage = () => {
   };
 
   const handleRunEval = () => {
-    const nonEmptyEntries = contentEntries.filter(entry => entry.text.trim());
-    const runtimeCopy = copySource === "import"
+    const validPasteProducts = pasteProducts
+      .map((product) => {
+        const nonEmptyEntries = product.contentEntries.filter((entry) => entry.text.trim());
+        if (!product.name.trim() || nonEmptyEntries.length === 0) return null;
+        return {
+          id: `custom-paste-copy-${product.id}`,
+          product_name: product.name.trim(),
+          content_type: nonEmptyEntries[0]?.contentType || product.contentEntries[0]?.contentType || "Description",
+          raw_text: nonEmptyEntries.map((entry) => `[${entry.contentType}]\n${entry.text}`).join("\n\n"),
+          metadata: {
+            content_entries: nonEmptyEntries.map((entry) => ({
+              content_type: entry.contentType,
+              raw_text: entry.text,
+              file_name: entry.fileName,
+            })),
+          },
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+      })
+      .filter(Boolean);
+
+    const runtimeCopies = copySource === "import"
       ? {
           id: "custom-import-copy",
           product_name: customCopyName.trim(),
@@ -321,35 +358,25 @@ const EvaluatePage = () => {
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         }
-      : {
-          id: "custom-paste-copy",
-          product_name: customCopyName.trim(),
-          content_type: nonEmptyEntries[0]?.contentType || contentEntries[0]?.contentType || "Description",
-          raw_text: nonEmptyEntries.map(entry => `[${entry.contentType}]\n${entry.text}`).join("\n\n"),
-          metadata: {
-            content_entries: nonEmptyEntries.map(entry => ({
-              content_type: entry.contentType,
-              raw_text: entry.text,
-              file_name: entry.fileName,
-            })),
-          },
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        };
+      : validPasteProducts;
 
     console.log("Running evaluation", {
       runName: runName.trim() || null,
       brand: runBrand.trim() || null,
       mode: selectionMode,
       suite: selectedSuite,
-      copy: runtimeCopy,
+      copies: Array.isArray(runtimeCopies) ? runtimeCopies : [runtimeCopies],
       hierarchyCriteria: [...selectedCriteriaIds],
     });
   };
 
+  const hasAtLeastOneValidPasteProduct = pasteProducts.some(
+    (product) => product.name.trim() && product.contentEntries.some((entry) => entry.text.trim()),
+  );
+
   const canRun = (copySource === "import"
     ? !!importedCopyText.trim()
-    : !!customCopyName.trim() && contentEntries.some(entry => entry.text.trim())) && (
+    : hasAtLeastOneValidPasteProduct) && (
     selectionMode === "suite" ? !!selectedSuite : hierarchyFiltered.length > 0
   );
 
@@ -371,23 +398,95 @@ const EvaluatePage = () => {
     }
   };
 
-  const updateContentEntry = (entryId: number, updates: Partial<ContentEntry>) => {
-    setContentEntries(prev => prev.map(entry => (entry.id === entryId ? { ...entry, ...updates } : entry)));
+  const updatePasteProductName = (productId: number, name: string) => {
+    setPasteProducts((prev) =>
+      prev.map((product) => (product.id === productId ? { ...product, name } : product)),
+    );
   };
 
-  const addContentEntry = () => {
-    const selectedTypes = new Set(contentEntries.map(entry => entry.contentType));
+  const updateProductContentEntry = (productId: number, entryId: number, updates: Partial<ContentEntry>) => {
+    setPasteProducts((prev) =>
+      prev.map((product) =>
+        product.id === productId
+          ? {
+              ...product,
+              contentEntries: product.contentEntries.map((entry) =>
+                entry.id === entryId ? { ...entry, ...updates } : entry,
+              ),
+            }
+          : product,
+      ),
+    );
+  };
+
+  const addProductContentEntry = (productId: number) => {
+    const product = pasteProducts.find((candidate) => candidate.id === productId);
+    if (!product) return;
+    const selectedTypes = new Set(product.contentEntries.map((entry) => entry.contentType));
     const firstAvailable = CONTENT_TYPES.find(type => !selectedTypes.has(type)) || "Description";
-    setContentEntries(prev => [...prev, { id: nextContentEntryId, contentType: firstAvailable, text: "" }]);
-    setNextContentEntryId(prev => prev + 1);
+    const newEntryId = nextContentEntryId;
+    setNextContentEntryId((prev) => prev + 1);
+    setPasteProducts((prev) =>
+      prev.map((candidate) =>
+        candidate.id === productId
+          ? {
+              ...candidate,
+              contentEntries: [...candidate.contentEntries, { id: newEntryId, contentType: firstAvailable, text: "" }],
+            }
+          : candidate,
+      ),
+    );
   };
 
-  const removeContentEntry = (entryId: number) => {
-    setContentEntries(prev => (prev.length > 1 ? prev.filter(entry => entry.id !== entryId) : prev));
+  const removeProductContentEntry = (productId: number, entryId: number) => {
+    setPasteProducts((prev) =>
+      prev.map((product) => {
+        if (product.id !== productId) return product;
+        if (product.contentEntries.length <= 1) return product;
+        return {
+          ...product,
+          contentEntries: product.contentEntries.filter((entry) => entry.id !== entryId),
+        };
+      }),
+    );
   };
 
-  const contentTypeUsedByOtherEntry = (entryId: number, type: ContentType) =>
-    contentEntries.some(entry => entry.id !== entryId && entry.contentType === type);
+  const contentTypeUsedByOtherEntry = (productId: number, entryId: number, type: ContentType) => {
+    const product = pasteProducts.find((candidate) => candidate.id === productId);
+    if (!product) return false;
+    return product.contentEntries.some((entry) => entry.id !== entryId && entry.contentType === type);
+  };
+
+  const addPasteProduct = () => {
+    const productId = nextPasteProductId;
+    const entryId = nextContentEntryId;
+    setNextPasteProductId((prev) => prev + 1);
+    setNextContentEntryId((prev) => prev + 1);
+    setPasteProducts((prev) => [
+      ...prev,
+      {
+        id: productId,
+        name: "",
+        isExpanded: true,
+        contentEntries: [{ id: entryId, contentType: "Description", text: "" }],
+      },
+    ]);
+  };
+
+  const removePasteProduct = (productId: number) => {
+    setPasteProducts((prev) => {
+      if (prev.length <= 1) return prev;
+      return prev.filter((product) => product.id !== productId);
+    });
+  };
+
+  const togglePasteProductExpanded = (productId: number) => {
+    setPasteProducts((prev) =>
+      prev.map((product) =>
+        product.id === productId ? { ...product, isExpanded: !product.isExpanded } : product,
+      ),
+    );
+  };
 
   const formatCriterionScore = (criterion: Criterion | undefined, score: number) => {
     if (!criterion) return String(score);
@@ -575,7 +674,7 @@ const EvaluatePage = () => {
   };
   const renderNormalizedScoreBadge = (score01: number) => (
     <Badge className={`text-[10px] font-medium min-w-[74px] justify-center tabular-nums ${getOutcomeBadgeClass(score01 * 100)}`}>
-      S: {formatScore01(score01)}
+      {formatScore01(score01)}
     </Badge>
   );
 
@@ -787,7 +886,7 @@ const EvaluatePage = () => {
                   <div key={`${treeKey}-${criterionNode.id}`} className="grid grid-cols-[minmax(0,1fr)_140px_84px] items-center gap-2 px-2 py-1.5">
                     <div className="min-w-0 grid grid-cols-[auto_minmax(180px,240px)_96px_72px_minmax(0,1fr)] items-center gap-1.5 text-xs">
                       <Badge variant="outline" className="text-[10px] font-normal capitalize">
-                        Criterion
+                        Criteria
                       </Badge>
                       <span className="font-medium truncate">{criterionNode.label}</span>
                       <span className="inline-flex items-center">
@@ -864,6 +963,64 @@ const EvaluatePage = () => {
     }));
   };
 
+  const formatRunDateTime = (run: EvalRun) =>
+    new Date(run.completed_at || run.started_at).toLocaleString(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+
+  const toggleRunInputSection = (runId: string) => {
+    setOpenRunInputByRun((prev) => ({
+      ...prev,
+      [runId]: !(prev[runId] ?? false),
+    }));
+  };
+
+  const renderRunInputHeaderControl = (run: EvalRun) => {
+    const input = run.input_summary;
+    if (!input) return null;
+
+    if (input.source === "import") {
+      if (!input.import_file_name) return null;
+      return <Badge variant="outline" className="text-[10px]">{input.import_file_name}</Badge>;
+    }
+
+    const isOpen = openRunInputByRun[run.id] ?? false;
+    return (
+      <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-[11px]" onClick={() => toggleRunInputSection(run.id)}>
+        Content (pasted)
+        {isOpen ? <ChevronUp className="h-3.5 w-3.5 ml-1" /> : <ChevronDown className="h-3.5 w-3.5 ml-1" />}
+      </Button>
+    );
+  };
+
+  const renderRunInputExpandedContent = (run: EvalRun) => {
+    const input = run.input_summary;
+    if (!input || input.source !== "paste") return null;
+    const isOpen = openRunInputByRun[run.id] ?? false;
+    if (!isOpen) return null;
+
+    return (
+      <Collapsible open={isOpen}>
+        <CollapsibleContent forceMount className="rounded-md border p-2 space-y-2">
+          {input.products.map((product, index) => (
+            <div key={`${run.id}-input-${index}`} className="rounded border p-2 space-y-1">
+              <p className="text-xs font-medium">{product.product_name}</p>
+              <div className="space-y-1">
+                {product.entries.map((entry, entryIndex) => (
+                  <div key={`${run.id}-input-${index}-${entryIndex}`} className="flex items-start gap-1.5">
+                    <Badge variant="outline" className="text-[10px] shrink-0">{entry.content_type}</Badge>
+                    <span className="text-[11px] text-muted-foreground truncate">{entry.raw_text}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </CollapsibleContent>
+      </Collapsible>
+    );
+  };
+
   const renderVersion1ProductList = (
     products: Array<ReturnType<typeof getRunProducts>[number]>,
     listKeyPrefix: string,
@@ -875,7 +1032,6 @@ const EvaluatePage = () => {
         const isExpanded = openHistoryProducts[productKey] ?? (defaultExpandFirst && index === 0);
         const productCopy = MOCK_COPIES.find((candidate) => candidate.id === product.product_copy_id);
         const productHierarchy = getRunHierarchy(product);
-        const productCounts = getRunCounts(productHierarchy.nodes);
 
         return (
           <div key={productKey} className="rounded-md border">
@@ -888,9 +1044,19 @@ const EvaluatePage = () => {
                 <div className="flex items-center gap-2 text-left min-w-0">
                   {isExpanded ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
                   <span className="text-base font-semibold truncate">{productCopy?.product_name || product.product_copy_id}</span>
-                  <Badge variant="outline" className="text-[10px]">Criteria: {productCounts.criteria}</Badge>
                 </div>
                 <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    aria-label={`Download ${productCopy?.product_name || product.product_copy_id}`}
+                    title="Download"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <Download className="h-4 w-4 text-muted-foreground" />
+                  </Button>
                   {product.overall_score !== null ? (
                     <div className="h-9 w-9 rounded-full border-2 border-score-excellent bg-score-excellent/10 text-score-excellent text-sm font-bold tabular-nums flex items-center justify-center">
                       {Math.round(product.overall_score)}
@@ -915,31 +1081,77 @@ const EvaluatePage = () => {
     </div>
   );
 
+  const historyBrandOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          MOCK_RUNS.map((run) => run.brand?.trim())
+            .filter((brand): brand is string => Boolean(brand)),
+        ),
+      ).sort((a, b) => a.localeCompare(b)),
+    [],
+  );
+
+  const historySuiteOptions = useMemo(
+    () =>
+      Array.from(new Set(MOCK_RUNS.map((run) => run.suite_id)))
+        .map((suiteId) => ({
+          id: suiteId,
+          name: MOCK_SUITES.find((suite) => suite.id === suiteId)?.name || suiteId,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [],
+  );
+
+  const filteredHistoryRuns = useMemo(() => {
+    const normalizedTitleQuery = historyTitleQuery.trim().toLowerCase();
+    return [...MOCK_RUNS]
+      .filter((run) => {
+        const title = (run.evaluation_title || "").toLowerCase();
+        const titleMatches = normalizedTitleQuery.length === 0 || title.includes(normalizedTitleQuery);
+        const brandMatches = historyBrandFilter === "all" || (run.brand || "") === historyBrandFilter;
+        const suiteMatches = historySuiteFilter === "all" || run.suite_id === historySuiteFilter;
+        return titleMatches && brandMatches && suiteMatches;
+      })
+      .sort((a, b) => new Date(b.completed_at || b.started_at).getTime() - new Date(a.completed_at || a.started_at).getTime());
+  }, [historyTitleQuery, historyBrandFilter, historySuiteFilter]);
+
   return (
     <div className="p-6 space-y-6 animate-fade-in">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Evaluate</h1>
-        <p className="text-sm text-muted-foreground mt-1">Run AI evaluations on product copy</p>
       </div>
 
       {/* Run configuration */}
       <Card className="shadow-card">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base">New Evaluation Run</CardTitle>
+        <CardHeader className="py-3">
+          <button
+            type="button"
+            className="w-full h-8 flex items-center justify-between text-left"
+            onClick={() => setIsNewEvaluationRunOpen((prev) => !prev)}
+            aria-expanded={isNewEvaluationRunOpen}
+            aria-label={isNewEvaluationRunOpen ? "Collapse New Evaluation Run" : "Expand New Evaluation Run"}
+          >
+            <CardTitle className="text-base">New Evaluation Run</CardTitle>
+            {isNewEvaluationRunOpen ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+          </button>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Evaluation Title</label>
+        {isNewEvaluationRunOpen ? (
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            <div className="space-y-1">
+              <label className="text-[11px] font-semibold text-foreground">Evaluation Title</label>
               <Input
+                className="h-9"
                 placeholder="e.g. March PDP QA Evaluation"
                 value={runName}
                 onChange={(e) => setRunName(e.target.value)}
               />
             </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Brand</label>
+            <div className="space-y-1">
+              <label className="text-[11px] font-semibold text-foreground">Brand</label>
               <Input
+                className="h-9"
                 placeholder="Type brand"
                 value={runBrand}
                 onChange={(e) => setRunBrand(e.target.value)}
@@ -948,20 +1160,28 @@ const EvaluatePage = () => {
           </div>
 
           {/* Product copy selection — always visible */}
-          <div className="space-y-2">
-            <label className="text-xs font-medium text-muted-foreground">Product Copy</label>
+          <div className="space-y-1.5">
+            <label className="text-[11px] font-semibold text-foreground">Content for Evaluation</label>
             <Tabs value={copySource} onValueChange={(v) => setCopySource(v as "import" | "paste")}>
-              <TabsList>
-                <TabsTrigger value="import">Import</TabsTrigger>
-                <TabsTrigger value="paste">Paste</TabsTrigger>
-              </TabsList>
+              <div className="flex items-center justify-between gap-2">
+                <TabsList className="h-9">
+                  <TabsTrigger value="import">Import</TabsTrigger>
+                  <TabsTrigger value="paste">Paste</TabsTrigger>
+                </TabsList>
+                {copySource === "paste" ? (
+                  <Button type="button" variant="outline" size="sm" onClick={addPasteProduct} className="h-9 gap-1.5 px-3">
+                    <Plus className="h-3.5 w-3.5" />
+                    Add product
+                  </Button>
+                ) : null}
+              </div>
 
-              <TabsContent value="import" className="mt-2 space-y-3">
-                <p className="text-xs text-muted-foreground">
-                  Import column format: product name (required), title (optional), description (optional),
-                  bullets/specs (optional), meta description (optional).
-                </p>
-                <div className="space-y-2">
+              <TabsContent value="import" className="mt-2">
+                <div className="space-y-2 rounded-md border p-3">
+                  <p className="text-xs text-muted-foreground">
+                    Import column format: product name (required), title (optional), description (optional),
+                    bullets/specs (optional), meta description (optional).
+                  </p>
                   <Input
                     type="file"
                     accept=".txt,.md,.csv,.json"
@@ -972,44 +1192,98 @@ const EvaluatePage = () => {
                 </div>
               </TabsContent>
 
-              <TabsContent value="paste" className="mt-2 space-y-3">
-                <Input
-                  placeholder="Product name"
-                  value={customCopyName}
-                  onChange={(e) => setCustomCopyName(e.target.value)}
-                />
-                <div className="space-y-3">
-                  {contentEntries.map((entry) => (
-                    <div key={entry.id} className="space-y-2 rounded-md border p-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <div className="min-w-[220px] flex-1">
-                          <Select
-                            value={entry.contentType}
-                            onValueChange={(value) => updateContentEntry(entry.id, { contentType: value as ContentType })}
-                          >
-                            <SelectTrigger><SelectValue placeholder="Content type" /></SelectTrigger>
-                            <SelectContent>
-                              {CONTENT_TYPES.map(ct => (
-                                <SelectItem key={`paste-entry-${entry.id}-${ct}`} value={ct} disabled={contentTypeUsedByOtherEntry(entry.id, ct)}>
-                                  {ct}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <Button type="button" variant="outline" size="icon" onClick={addContentEntry}>
-                          <Plus className="h-4 w-4" />
-                        </Button>
-                        <Button type="button" variant="outline" size="icon" onClick={() => removeContentEntry(entry.id)} disabled={contentEntries.length === 1}>
-                          <Trash2 className="h-4 w-4" />
+              <TabsContent value="paste" className="mt-2 space-y-2">
+                <div className="space-y-2">
+                  {pasteProducts.map((product, productIndex) => (
+                    <div key={product.id} className="rounded-md border">
+                      <div className="w-full px-2.5 py-2 border-b flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => togglePasteProductExpanded(product.id)}
+                          className="flex items-center gap-2 text-left min-w-0 flex-1"
+                        >
+                          {product.isExpanded ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+                          <span className="text-sm font-medium truncate">
+                            {product.name.trim() || `Product ${productIndex + 1}`}
+                          </span>
+                        </button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          onClick={() => removePasteProduct(product.id)}
+                          disabled={pasteProducts.length === 1}
+                          className="h-8 w-8"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
                         </Button>
                       </div>
-                      <Textarea
-                        rows={4}
-                        placeholder={`Paste or type ${entry.contentType} content here...`}
-                        value={entry.text}
-                        onChange={(e) => updateContentEntry(entry.id, { text: e.target.value })}
-                      />
+                      {product.isExpanded ? (
+                        <div className="space-y-2 p-2.5">
+                          <div>
+                            <Input
+                              className="h-9"
+                              placeholder="Product name"
+                              value={product.name}
+                              onChange={(e) => updatePasteProductName(product.id, e.target.value)}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            {product.contentEntries.map((entry, entryIndex) => (
+                              <div key={entry.id} className={`space-y-2 ${entryIndex > 0 ? "pt-2 border-t" : ""}`}>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <div className="min-w-[220px] flex-1">
+                                    <Select
+                                      value={entry.contentType}
+                                      onValueChange={(value) =>
+                                        updateProductContentEntry(product.id, entry.id, { contentType: value as ContentType })
+                                      }
+                                    >
+                                      <SelectTrigger className="h-9"><SelectValue placeholder="Content type" /></SelectTrigger>
+                                      <SelectContent>
+                                        {CONTENT_TYPES.map((ct) => (
+                                          <SelectItem
+                                            key={`paste-product-${product.id}-entry-${entry.id}-${ct}`}
+                                            value={ct}
+                                            disabled={contentTypeUsedByOtherEntry(product.id, entry.id, ct)}
+                                          >
+                                            {ct}
+                                          </SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="icon"
+                                    onClick={() => addProductContentEntry(product.id)}
+                                    className="h-9 w-9"
+                                  >
+                                    <Plus className="h-4 w-4" />
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="icon"
+                                    onClick={() => removeProductContentEntry(product.id, entry.id)}
+                                    disabled={product.contentEntries.length === 1}
+                                    className="h-9 w-9"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                </div>
+                                <Textarea
+                                  rows={3}
+                                  placeholder={`Paste or type ${entry.contentType} content here...`}
+                                  value={entry.text}
+                                  onChange={(e) => updateProductContentEntry(product.id, entry.id, { text: e.target.value })}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -1019,8 +1293,8 @@ const EvaluatePage = () => {
 
           {/* Tabs: Suite vs Hierarchy */}
           <Tabs value={selectionMode} onValueChange={setSelectionMode}>
-            <label className="block text-xs font-medium text-muted-foreground mb-1.5">Criteria</label>
-            <TabsList>
+            <label className="block text-[11px] font-semibold text-foreground mb-1">Criteria</label>
+            <TabsList className="h-9">
               <TabsTrigger value="suite">Select Suite</TabsTrigger>
               <TabsTrigger value="hierarchy">Playground</TabsTrigger>
             </TabsList>
@@ -1028,7 +1302,7 @@ const EvaluatePage = () => {
             <TabsContent value="suite" className="mt-3">
               <div className="space-y-1.5 max-w-md">
                 <Select value={selectedSuite} onValueChange={setSelectedSuite}>
-                  <SelectTrigger><SelectValue placeholder="Select suite" /></SelectTrigger>
+                  <SelectTrigger className="h-9"><SelectValue placeholder="Select suite" /></SelectTrigger>
                   <SelectContent>
                     {MOCK_SUITES.map(s => (
                       <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
@@ -1274,98 +1548,81 @@ const EvaluatePage = () => {
           <Button
             onClick={handleRunEval}
             disabled={!canRun}
-            className="gap-2"
+            className="h-9 gap-2"
           >
             <Play className="h-4 w-4" /> Run Evaluation
           </Button>
         </CardContent>
+        ) : null}
       </Card>
 
       {/* Past runs */}
       <div className="space-y-3">
         <h2 className="text-lg font-semibold">Evaluation History</h2>
-        {(() => {
-          const latestCompletedRun = MOCK_RUNS.find((candidate) => candidate.status === "completed");
-          if (!latestCompletedRun) return null;
-          const latestProducts = getRunProducts(latestCompletedRun);
-          return (
-            <Card className="shadow-card">
-              <CardContent className="p-4 space-y-3">
-                <div className="space-y-1">
-                  <p className="text-sm font-semibold">{latestCompletedRun.evaluation_title || "Evaluation Run"}</p>
-                  <p className="text-xs text-muted-foreground">
-                    Latest completed run · {latestProducts.length} product{latestProducts.length === 1 ? "" : "s"}
-                  </p>
-                </div>
-                {renderVersion1ProductList(latestProducts, `${latestCompletedRun.id}::latest-preview`, true)}
-              </CardContent>
-            </Card>
-          );
-        })()}
-
-        <p className="text-xs font-medium text-muted-foreground pt-1">Run Log</p>
-        {MOCK_RUNS.map(run => {
+        <Card className="shadow-card">
+          <CardContent className="p-3 grid grid-cols-1 md:grid-cols-3 gap-2">
+            <Input
+              className="h-9"
+              placeholder="Search evaluation title"
+              value={historyTitleQuery}
+              onChange={(event) => setHistoryTitleQuery(event.target.value)}
+            />
+            <Select value={historyBrandFilter} onValueChange={setHistoryBrandFilter}>
+              <SelectTrigger className="h-9">
+                <SelectValue placeholder="Filter by brand" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All brands</SelectItem>
+                {historyBrandOptions.map((brand) => (
+                  <SelectItem key={`history-brand-${brand}`} value={brand}>
+                    {brand}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={historySuiteFilter} onValueChange={setHistorySuiteFilter}>
+              <SelectTrigger className="h-9">
+                <SelectValue placeholder="Filter by suite" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All suites</SelectItem>
+                {historySuiteOptions.map((suite) => (
+                  <SelectItem key={`history-suite-${suite.id}`} value={suite.id}>
+                    {suite.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </CardContent>
+        </Card>
+        {filteredHistoryRuns.length === 0 ? (
+          <Card className="shadow-card">
+            <CardContent className="p-4 text-sm text-muted-foreground">No evaluation runs match the current filters.</CardContent>
+          </Card>
+        ) : null}
+        {filteredHistoryRuns.map((run, index) => {
           const runProducts = getRunProducts(run);
-          const primaryProduct = runProducts[0];
-          const copy = MOCK_COPIES.find(c => c.id === primaryProduct.product_copy_id);
-          const suite = MOCK_SUITES.find(s => s.id === run.suite_id);
-          const isExpanded = expandedRun === run.id;
-          const { nodes, rootNodeIds } = getRunHierarchy(primaryProduct);
-          const counts = getRunCounts(nodes);
-          const contextScoreChips = rootNodeIds
-            .map((nodeId) => nodes[nodeId])
-            .filter(Boolean)
-            .map((node) => `${node.label}: ${Math.round(node.normalized_0_100)}`);
+          const runDateLabel = run.completed_at ? "Ran" : "Started";
 
           return (
             <Card key={run.id} className="shadow-card">
-              <CardContent className="p-4">
-                <button
-                  onClick={() => setExpandedRun(isExpanded ? null : run.id)}
-                  className="w-full"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex items-start gap-4">
-                      {run.overall_score !== null && <ScoreCircle score={run.overall_score} size="sm" />}
-                      <div className="text-left space-y-1">
-                        <p className="text-sm font-semibold">{run.evaluation_title || "Evaluation Run"}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {suite?.name} · {runProducts.length} product{runProducts.length === 1 ? "" : "s"} · Primary: {copy?.product_name}
-                        </p>
-                        <div className="flex flex-wrap gap-1.5">
-                          <Badge variant="outline" className="text-[10px]">Products: {runProducts.length}</Badge>
-                          <Badge variant="outline" className="text-[10px]">Contexts: {counts.contexts}</Badge>
-                          <Badge variant="outline" className="text-[10px]">Branches: {counts.branches}</Badge>
-                          <Badge variant="outline" className="text-[10px]">Types: {counts.contentTypes}</Badge>
-                          <Badge variant="outline" className="text-[10px]">Categories: {counts.categories}</Badge>
-                          <Badge variant="outline" className="text-[10px]">Criteria: {counts.criteria}</Badge>
-                        </div>
-                        <div className="flex flex-wrap gap-1.5">
-                          {contextScoreChips.map((chip) => (
-                            <Badge key={`${run.id}-${chip}`} className="text-[10px] bg-muted text-foreground hover:bg-muted">
-                              {chip}
-                            </Badge>
-                          ))}
-                        </div>
-                      </div>
+              <CardContent className="p-4 space-y-3">
+                <div className="space-y-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-sm font-semibold">{run.evaluation_title || "Evaluation Run"}</p>
+                      {run.brand ? (
+                        <Badge variant="outline" className="text-[10px]">Brand: {run.brand}</Badge>
+                      ) : null}
                     </div>
-                    <div className="flex items-center gap-3">
-                      <StatusBadge status={run.status} />
-                      <span className="text-xs text-muted-foreground">
-                        {new Date(run.started_at).toLocaleDateString()}
-                      </span>
-                      {isExpanded ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
-                    </div>
+                    {renderRunInputHeaderControl(run)}
                   </div>
-                </button>
-
-                {isExpanded && run.status === "completed" && (
-                  <div className="mt-4 pt-4 border-t space-y-3 animate-fade-in">
-                    <Card className="border-dashed shadow-none">
-                      <CardContent>{renderVersion1ProductList(runProducts, `${run.id}::run-v1`)}</CardContent>
-                    </Card>
-                  </div>
-                )}
+                  <p className="text-xs text-muted-foreground">
+                    {runDateLabel} {formatRunDateTime(run)} · {runProducts.length} product{runProducts.length === 1 ? "" : "s"}
+                  </p>
+                </div>
+                {renderRunInputExpandedContent(run)}
+                {renderVersion1ProductList(runProducts, `${run.id}::history`, index === 0)}
               </CardContent>
             </Card>
           );

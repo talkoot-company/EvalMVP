@@ -918,9 +918,27 @@ const RUN_1_CRITERION_SCORES: EvalRun["criterion_scores"] = [
 ];
 
 const RUN_2_CRITERION_SCORES: EvalRun["criterion_scores"] = [
-  { criterion_id: "customer-benefit", score: 1, normalized_score: 100, reasoning: "Benefits are clearly framed: 'blocks out distractions', 'keep up with your active lifestyle', 'comfortable fit for all-day wear'." },
-  { criterion_id: "legal-compliance", score: 2, normalized_score: 50, reasoning: "'Active noise cancelling technology' claim needs substantiation. 'IPX5' rating should reference testing standard." },
-  { criterion_id: "reads-naturally", score: 3, normalized_score: 75, reasoning: "Reads smoothly overall. Minor awkwardness in the transition between battery life and waterproof claims." },
+  { criterion_id: "product-type-stated", score: 1, normalized_score: 100, reasoning: "Product type is explicit and easy to identify at first glance." },
+  { criterion_id: "model-name-clarity", score: 1, normalized_score: 100, reasoning: "Model token is clear and not ambiguous." },
+  { criterion_id: "variant-identifier", score: 1, normalized_score: 100, reasoning: "Variant naming is understandable for comparison shopping." },
+  { criterion_id: "brand-leading-placement", score: 3, normalized_score: 75, reasoning: "Brand appears early, though ordering could be tighter." },
+  { criterion_id: "title-product-form-factor", score: 1, normalized_score: 100, reasoning: "Form factor is directly stated." },
+  { criterion_id: "pack-size-clarity", score: 0, normalized_score: 0, reasoning: "Pack-size cue is missing from the title." },
+  { criterion_id: "unit-size-presence", score: 0, normalized_score: 0, reasoning: "Unit size details are not present in title language." },
+  { criterion_id: "identifier-elements-count", score: 3, normalized_score: 75, reasoning: "Three key identifier elements are present." },
+  { criterion_id: "keywords-used", score: 3, normalized_score: 75, reasoning: "High-intent keywords are present without obvious stuffing." },
+  { criterion_id: "title-core-benefit", score: 3, normalized_score: 75, reasoning: "Primary shopper benefit is visible in title framing." },
+  { criterion_id: "title-technical-coverage", score: 1, normalized_score: 100, reasoning: "Important technical terms are included." },
+  { criterion_id: "title-differentiator", score: 1, normalized_score: 100, reasoning: "Differentiator language is present and clear." },
+  { criterion_id: "title-priority-order", score: 3, normalized_score: 75, reasoning: "Attributes are mostly arranged by buying priority." },
+  { criterion_id: "title-keyword-balance", score: 3, normalized_score: 75, reasoning: "Keyword balance is good and remains readable." },
+  { criterion_id: "title-attribute-specificity", score: 1, normalized_score: 100, reasoning: "Attribute wording is concrete and specific." },
+  { criterion_id: "category-specific-claims", score: 1, normalized_score: 100, reasoning: "Category-specific claims are appropriate and supportable." },
+  { criterion_id: "substantiation-depth", score: 3, normalized_score: 75, reasoning: "Most claims include sufficient supporting detail." },
+  { criterion_id: "risky-superlatives-control", score: 1, normalized_score: 100, reasoning: "No unsupported superlatives were found." },
+  { criterion_id: "compliance-qualifiers", score: 1, normalized_score: 100, reasoning: "Qualifiers are present where claim sensitivity is higher." },
+  { criterion_id: "source-citation-clarity", score: 2, normalized_score: 50, reasoning: "Some citations need clearer attribution." },
+  { criterion_id: "claim-specificity", score: 3, normalized_score: 75, reasoning: "Claims are specific with measurable language in most places." },
 ];
 
 const toScaleScore = (normalized: number) => {
@@ -950,16 +968,18 @@ const buildVariantScores = (scores: EvalRun["criterion_scores"]): EvalRun["crite
       ...entry,
       score: nextScore,
       normalized_score: nextNormalized,
-      reasoning: `${entry.reasoning} (Variant sample result.)`,
+      reasoning: entry.reasoning,
     };
   });
 
 const RUN_1_VARIANT_CRITERION_SCORES = buildVariantScores(RUN_1_CRITERION_SCORES);
+const RUN_3_CRITERION_SCORES = buildVariantScores(RUN_2_CRITERION_SCORES);
 
 export const MOCK_RUNS: EvalRun[] = [
   {
     id: "run-1",
     evaluation_title: "Q1 Audio PDP Readiness",
+    brand: "ProFit",
     suite_id: "suite-general-title",
     product_copy_id: "copy-1",
     status: "completed",
@@ -997,37 +1017,86 @@ export const MOCK_RUNS: EvalRun[] = [
         ...buildHierarchyForRun(RUN_1_VARIANT_CRITERION_SCORES),
       },
     ],
+    input_summary: {
+      source: "paste",
+      products: [
+        {
+          product_name: "ProFit Wireless Earbuds X3",
+          entries: [
+            { content_type: "Title", raw_text: "ProFit Wireless Earbuds X3 - ANC, Bluetooth 5.3, 40H Battery" },
+            { content_type: "Bullets/Specs", raw_text: "IPX5 sweat resistant\nFast USB-C charge\nMultipoint pairing" },
+            { content_type: "Description", raw_text: "Compact earbuds with adaptive noise cancellation and deep bass tuning for everyday commuting." },
+          ],
+        },
+        {
+          product_name: "AeroPulse Sport Earbuds Pro",
+          entries: [
+            { content_type: "Title", raw_text: "AeroPulse Sport Earbuds Pro - Secure Fit, Sweatproof, 36H Playtime" },
+            { content_type: "Description", raw_text: "Workout-focused earbuds built for stability, clear calls, and long battery performance." },
+          ],
+        },
+      ],
+    },
     started_at: "2025-02-15T14:00:00Z",
     completed_at: "2025-02-15T14:02:30Z",
   },
   {
     id: "run-2",
     evaluation_title: "Description Compliance Sprint",
+    brand: "Luma Skin",
     suite_id: "suite-desc-compliance",
     product_copy_id: "copy-2",
     status: "completed",
     overall_score: 71,
     category_scores: {
-      "Relevant Product Attributes": 85,
-      "Claim Integrity": 50,
-      "Structure and Readability": 75,
+      "Product Identification": 76,
+      "Relevant Product Attributes": 86,
+      "Claim Integrity": 82,
     },
     criterion_scores: RUN_2_CRITERION_SCORES,
     ...buildHierarchyForRun(RUN_2_CRITERION_SCORES),
+    input_summary: {
+      source: "import",
+      import_file_name: "luma-skin-description-batch.csv",
+      products: [
+        {
+          product_name: "Luma Retinol Night Serum",
+          entries: [{ content_type: "Description", raw_text: "Imported via file" }],
+        },
+      ],
+    },
     started_at: "2025-02-15T14:05:00Z",
     completed_at: "2025-02-15T14:07:15Z",
   },
   {
     id: "run-3",
     evaluation_title: "Yoga Mat Listing QA Batch",
+    brand: "ZenFlex",
     suite_id: "suite-general-title",
     product_copy_id: "copy-3",
-    status: "running",
-    overall_score: null,
-    category_scores: {},
-    criterion_scores: [],
-    ...buildHierarchyForRun([]),
+    status: "completed",
+    overall_score: 77,
+    category_scores: {
+      "Product Identification": 72,
+      "Relevant Product Attributes": 78,
+      "Claim Integrity": 69,
+    },
+    criterion_scores: RUN_3_CRITERION_SCORES,
+    ...buildHierarchyForRun(RUN_3_CRITERION_SCORES),
+    input_summary: {
+      source: "import",
+      import_file_name: "zenflex-listings-q1.json",
+      products: [
+        {
+          product_name: "ZenFlex Premium Yoga Mat",
+          entries: [
+            { content_type: "Title", raw_text: "ZenFlex Premium Yoga Mat - Non-Slip Grip, 6mm Cushion, Carry Strap" },
+            { content_type: "Description", raw_text: "Imported listing copy for flexibility, grip confidence, and long-session comfort." },
+          ],
+        },
+      ],
+    },
     started_at: "2025-02-26T10:30:00Z",
-    completed_at: null,
+    completed_at: "2025-02-26T10:36:40Z",
   },
 ];

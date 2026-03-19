@@ -132,9 +132,26 @@ export interface EvalRunProductResult {
   root_node_ids?: string[];
 }
 
+export interface EvalRunInputEntry {
+  content_type: ContentType;
+  raw_text: string;
+}
+
+export interface EvalRunInputProduct {
+  product_name: string;
+  entries: EvalRunInputEntry[];
+}
+
+export interface EvalRunInputSummary {
+  source: "import" | "paste";
+  import_file_name?: string;
+  products: EvalRunInputProduct[];
+}
+
 export interface EvalRun {
   id: string;
   evaluation_title?: string;
+  brand?: string;
   suite_id: string;
   product_copy_id: string;
   status: EvalRunStatus;
@@ -145,6 +162,7 @@ export interface EvalRun {
   hierarchical_scores?: Record<string, EvalRunScoreNode>;
   root_node_ids?: string[];
   product_results?: EvalRunProductResult[];
+  input_summary?: EvalRunInputSummary;
   started_at: string;
   completed_at: string | null;
 }
