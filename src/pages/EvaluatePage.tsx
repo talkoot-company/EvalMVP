@@ -17,7 +17,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Play, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Plus, Trash2, Download } from "lucide-react";
+import { Play, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Plus, Trash2, Download, Upload, Clipboard } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CONTENT_TYPES, deriveCategoriesFromCriteria } from "@/config/hierarchy";
 import type { EvalRun, Criterion, ContentType, EvalRunScoreNode } from "@/types";
@@ -50,14 +50,38 @@ const CONTEXT_ORDER = ["Universal", "Industry", "Marketplace", "Brand"];
 const TALKOOT_CONNECT_OPTIONS = {
   Tapestry: {
     brands: {
-      Coach: ["3.24 Carryover", "Spring Outlet Refresh", "Summer Hero Assortment"],
-      "Kate Spade": ["3.24 Carryover", "Holiday Gifting PDPs", "New Arrivals Batch A"],
+      Coach: {
+        jobs: {
+          "3.24 Carryover": ["Product Description", "Bullets", "Meta Description"],
+          "Spring Outlet Refresh": ["Product Description", "Bullets"],
+          "Summer Hero Assortment": ["Product Description", "Title", "Bullets"],
+        },
+      },
+      "Kate Spade": {
+        jobs: {
+          "3.24 Carryover": ["Product Description", "Bullets", "Meta Description"],
+          "Holiday Gifting PDPs": ["Title", "Product Description"],
+          "New Arrivals Batch A": ["Product Description", "Bullets"],
+        },
+      },
     },
   },
   Adidas: {
     brands: {
-      Originals: ["3.24 Carryover", "Terrace Collection Launch", "Samba PDP Refresh"],
-      Performance: ["3.24 Carryover", "Running Footwear Q2", "Training Essentials Load"],
+      Originals: {
+        jobs: {
+          "3.24 Carryover": ["Product Description", "Bullets", "Title"],
+          "Terrace Collection Launch": ["Title", "Product Description"],
+          "Samba PDP Refresh": ["Product Description", "Meta Description"],
+        },
+      },
+      Performance: {
+        jobs: {
+          "3.24 Carryover": ["Product Description", "Bullets", "Meta Description"],
+          "Running Footwear Q2": ["Title", "Product Description", "Bullets"],
+          "Training Essentials Load": ["Product Description", "Bullets"],
+        },
+      },
     },
   },
 } as const;
@@ -88,12 +112,14 @@ const toWeightTier = (weight: number | undefined) => {
   return Math.max(1, Math.min(3, rounded));
 };
 
+const sectionTitleClassName = "text-sm font-semibold text-[#1f3b67]";
+
 const EvaluatePage = () => {
   // Suite-based selection
   const [selectedSuite, setSelectedSuite] = useState<string>("");
   const [runName, setRunName] = useState("");
   const [runBrand, setRunBrand] = useState("");
-  const [copySource, setCopySource] = useState<CopySource>("paste");
+  const [copySource, setCopySource] = useState<CopySource>("talkoot-connect");
   const [customCopyName, setCustomCopyName] = useState("");
   const [pasteProducts, setPasteProducts] = useState<PasteProductDraft[]>([
     {
@@ -111,6 +137,7 @@ const EvaluatePage = () => {
   const [talkootInstance, setTalkootInstance] = useState("");
   const [talkootBrand, setTalkootBrand] = useState("");
   const [talkootCorpusJob, setTalkootCorpusJob] = useState("");
+  const [talkootField, setTalkootField] = useState("");
   const [openHistoryNodesByTree, setOpenHistoryNodesByTree] = useState<Record<string, Set<string>>>({});
   const [openHistoryProducts, setOpenHistoryProducts] = useState<Record<string, boolean>>({});
   const [openRunInputByRun, setOpenRunInputByRun] = useState<Record<string, boolean>>({});
@@ -132,8 +159,21 @@ const EvaluatePage = () => {
   const talkootCorpusJobs = useMemo(() => {
     if (!talkootInstance || !talkootBrand) return [];
     return TALKOOT_CONNECT_OPTIONS[talkootInstance as keyof typeof TALKOOT_CONNECT_OPTIONS]
-      .brands[talkootBrand as keyof (typeof TALKOOT_CONNECT_OPTIONS)[keyof typeof TALKOOT_CONNECT_OPTIONS]["brands"]] ?? [];
+      .brands[talkootBrand as keyof (typeof TALKOOT_CONNECT_OPTIONS)[keyof typeof TALKOOT_CONNECT_OPTIONS]["brands"]]
+      .jobs
+      ? Object.keys(
+          TALKOOT_CONNECT_OPTIONS[talkootInstance as keyof typeof TALKOOT_CONNECT_OPTIONS]
+            .brands[talkootBrand as keyof (typeof TALKOOT_CONNECT_OPTIONS)[keyof typeof TALKOOT_CONNECT_OPTIONS]["brands"]]
+            .jobs,
+        )
+      : [];
   }, [talkootBrand, talkootInstance]);
+  const talkootFields = useMemo(() => {
+    if (!talkootInstance || !talkootBrand || !talkootCorpusJob) return [];
+    return TALKOOT_CONNECT_OPTIONS[talkootInstance as keyof typeof TALKOOT_CONNECT_OPTIONS]
+      .brands[talkootBrand as keyof (typeof TALKOOT_CONNECT_OPTIONS)[keyof typeof TALKOOT_CONNECT_OPTIONS]["brands"]]
+      .jobs[talkootCorpusJob as keyof (typeof TALKOOT_CONNECT_OPTIONS)[keyof typeof TALKOOT_CONNECT_OPTIONS]["brands"][keyof (typeof TALKOOT_CONNECT_OPTIONS)[keyof typeof TALKOOT_CONNECT_OPTIONS]["brands"]]["jobs"]] ?? [];
+  }, [talkootBrand, talkootCorpusJob, talkootInstance]);
   // Hierarchy-based selection
   const [selectedContexts, setSelectedContexts] = useState<Set<string>>(() => new Set(runtimeTaxonomy.contexts));
   const [selectedContentTypes, setSelectedContentTypes] = useState<Set<string>>(() => new Set(runtimeTaxonomy.contentTypes));
@@ -392,14 +432,15 @@ const EvaluatePage = () => {
       : copySource === "talkoot-connect"
         ? {
             id: "talkoot-connect-copy",
-            product_name: `${talkootBrand} - ${talkootCorpusJob}`,
+            product_name: `${talkootBrand} - ${talkootCorpusJob} - ${talkootField}`,
             content_type: "Description" as ContentType,
-            raw_text: `Connected via Talkoot Connect\nInstance: ${talkootInstance}\nBrand: ${talkootBrand}\nCorpus Job: ${talkootCorpusJob}`,
+            raw_text: `Connected via Talkoot Connect\nInstance: ${talkootInstance}\nBrand: ${talkootBrand}\nCorpus Job: ${talkootCorpusJob}\nField: ${talkootField}`,
             metadata: {
               source: "talkoot-connect",
               instance: talkootInstance,
               brand: talkootBrand,
               corpus_job: talkootCorpusJob,
+              field: talkootField,
             },
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
@@ -419,7 +460,7 @@ const EvaluatePage = () => {
   const hasAtLeastOneValidPasteProduct = pasteProducts.some(
     (product) => product.name.trim() && product.contentEntries.some((entry) => entry.text.trim()),
   );
-  const hasValidTalkootSelection = !!talkootInstance && !!talkootBrand && !!talkootCorpusJob;
+  const hasValidTalkootSelection = !!talkootInstance && !!talkootBrand && !!talkootCorpusJob && !!talkootField;
 
   const canRun = (copySource === "import"
     ? !!importedCopyText.trim()
@@ -451,11 +492,18 @@ const EvaluatePage = () => {
     setTalkootInstance(value);
     setTalkootBrand("");
     setTalkootCorpusJob("");
+    setTalkootField("");
   };
 
   const handleTalkootBrandChange = (value: string) => {
     setTalkootBrand(value);
     setTalkootCorpusJob("");
+    setTalkootField("");
+  };
+
+  const handleTalkootCorpusJobChange = (value: string) => {
+    setTalkootCorpusJob(value);
+    setTalkootField("");
   };
 
   const updatePasteProductName = (productId: number, name: string) => {
@@ -1327,7 +1375,7 @@ const EvaluatePage = () => {
   }, [historyTitleQuery, historyBrandFilter, historySuiteFilter, historySortBy]);
 
   return (
-    <div className="p-6 space-y-6 animate-fade-in">
+    <div className="mx-auto w-full max-w-[1360px] p-6 space-y-6 animate-fade-in">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Evaluate</h1>
       </div>
@@ -1347,8 +1395,8 @@ const EvaluatePage = () => {
           </button>
         </CardHeader>
         {isNewEvaluationRunOpen ? (
-        <CardContent className="space-y-3">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <CardContent className="space-y-5">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <div className="space-y-1">
               <label className="text-[11px] font-semibold text-foreground">Evaluation Title</label>
               <Input
@@ -1370,24 +1418,45 @@ const EvaluatePage = () => {
           </div>
 
           {/* Product copy selection — always visible */}
-          <div className="space-y-1.5">
-            <label className="text-[11px] font-semibold text-foreground">Content for Evaluation</label>
-            <Tabs value={copySource} onValueChange={(v) => setCopySource(v as CopySource)}>
-              <div className="flex items-center justify-between gap-2">
-                <TabsList className="h-9">
-                  <TabsTrigger value="import">Import</TabsTrigger>
-                  <TabsTrigger value="paste">Paste</TabsTrigger>
-                  <TabsTrigger value="talkoot-connect">Talkoot Connect</TabsTrigger>
-                </TabsList>
-                {copySource === "paste" ? (
-                  <Button type="button" variant="outline" size="sm" onClick={addPasteProduct} className="h-9 gap-1.5 px-3">
-                    <Plus className="h-3.5 w-3.5" />
-                    Add product
+          <div className="space-y-2">
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex-1 min-w-[240px]">
+                  <div className={sectionTitleClassName}>Content for Evaluation</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant={copySource === "import" ? "default" : "outline"}
+                    size="icon"
+                    className="h-9 w-9"
+                    onClick={() => setCopySource((prev) => (prev === "import" ? "talkoot-connect" : "import"))}
+                    aria-label="Use import content source"
+                    title="Import"
+                  >
+                    <Upload className="h-4 w-4" />
                   </Button>
-                ) : null}
+                  <Button
+                    type="button"
+                    variant={copySource === "paste" ? "default" : "outline"}
+                    size="icon"
+                    className="h-9 w-9"
+                    onClick={() => setCopySource((prev) => (prev === "paste" ? "talkoot-connect" : "paste"))}
+                    aria-label="Use paste content source"
+                    title="Paste"
+                  >
+                    <Clipboard className="h-4 w-4" />
+                  </Button>
+                  {copySource === "paste" ? (
+                    <Button type="button" variant="outline" size="sm" onClick={addPasteProduct} className="h-9 gap-1.5 px-3">
+                      <Plus className="h-3.5 w-3.5" />
+                      Add product
+                    </Button>
+                  ) : null}
+                </div>
               </div>
 
-              <TabsContent value="import" className="mt-2">
+              {copySource === "import" ? (
                 <div className="space-y-2 rounded-md border p-3">
                   <p className="text-xs text-muted-foreground">
                     Import column format: product name (required), title (optional), description (optional),
@@ -1401,9 +1470,9 @@ const EvaluatePage = () => {
                   {importFileName && <p className="text-xs text-muted-foreground">Loaded: {importFileName}</p>}
                   {importError && <p className="text-xs text-destructive">{importError}</p>}
                 </div>
-              </TabsContent>
+              ) : null}
 
-              <TabsContent value="paste" className="mt-2 space-y-2">
+              {copySource === "paste" ? (
                 <div className="space-y-2">
                   {pasteProducts.map((product, productIndex) => (
                     <div key={product.id} className="rounded-md border">
@@ -1498,70 +1567,83 @@ const EvaluatePage = () => {
                     </div>
                   ))}
                 </div>
-              </TabsContent>
+              ) : null}
 
-              <TabsContent value="talkoot-connect" className="mt-2">
-                <div className="space-y-3 rounded-md border p-3">
-                  <p className="text-xs text-muted-foreground">
-                    Connect to copy already available in Talkoot. Choose an instance, then a brand, then the corpus job to evaluate.
-                  </p>
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-semibold text-foreground">Instance</label>
-                      <Select value={talkootInstance} onValueChange={handleTalkootInstanceChange}>
-                        <SelectTrigger className="h-9">
-                          <SelectValue placeholder="Select instance" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {talkootInstances.map((instance) => (
-                            <SelectItem key={instance} value={instance}>
-                              {instance}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
+              {copySource === "talkoot-connect" ? (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-foreground">Instance</label>
+                    <Select value={talkootInstance} onValueChange={handleTalkootInstanceChange}>
+                      <SelectTrigger className="h-9">
+                        <SelectValue placeholder="Select instance" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {talkootInstances.map((instance) => (
+                          <SelectItem key={instance} value={instance}>
+                            {instance}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
 
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-semibold text-foreground">Brand</label>
-                      <Select value={talkootBrand} onValueChange={handleTalkootBrandChange} disabled={!talkootInstance}>
-                        <SelectTrigger className="h-9">
-                          <SelectValue placeholder={talkootInstance ? "Select brand" : "Select instance first"} />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {talkootBrands.map((brand) => (
-                            <SelectItem key={brand} value={brand}>
-                              {brand}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-foreground">Brand</label>
+                    <Select value={talkootBrand} onValueChange={handleTalkootBrandChange} disabled={!talkootInstance}>
+                      <SelectTrigger className="h-9">
+                        <SelectValue placeholder={talkootInstance ? "Select brand" : "Select instance first"} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {talkootBrands.map((brand) => (
+                          <SelectItem key={brand} value={brand}>
+                            {brand}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
 
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-semibold text-foreground">Corpus Job</label>
-                      <Select value={talkootCorpusJob} onValueChange={setTalkootCorpusJob} disabled={!talkootBrand}>
-                        <SelectTrigger className="h-9">
-                          <SelectValue placeholder={talkootBrand ? "Select corpus job" : "Select brand first"} />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {talkootCorpusJobs.map((job) => (
-                            <SelectItem key={job} value={job}>
-                              {job}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-foreground">Corpus Job</label>
+                    <Select value={talkootCorpusJob} onValueChange={handleTalkootCorpusJobChange} disabled={!talkootBrand}>
+                      <SelectTrigger className="h-9">
+                        <SelectValue placeholder={talkootBrand ? "Select corpus job" : "Select brand first"} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {talkootCorpusJobs.map((job) => (
+                          <SelectItem key={job} value={job}>
+                            {job}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-foreground">Field</label>
+                    <Select value={talkootField} onValueChange={setTalkootField} disabled={!talkootCorpusJob}>
+                      <SelectTrigger className="h-9">
+                        <SelectValue placeholder={talkootCorpusJob ? "Select field" : "Select corpus job first"} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {talkootFields.map((field) => (
+                          <SelectItem key={field} value={field}>
+                            {field}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
-              </TabsContent>
-            </Tabs>
+              ) : null}
+            </div>
           </div>
 
           {/* Tabs: Suite vs Hierarchy */}
           <Tabs value={selectionMode} onValueChange={setSelectionMode}>
-            <label className="block text-[11px] font-semibold text-foreground mb-1">Criteria</label>
+            <div className="mb-2">
+              <div className={sectionTitleClassName}>Criteria</div>
+            </div>
             <TabsList className="h-9">
               <TabsTrigger value="suite">Select Suite</TabsTrigger>
               <TabsTrigger value="hierarchy">Playground</TabsTrigger>

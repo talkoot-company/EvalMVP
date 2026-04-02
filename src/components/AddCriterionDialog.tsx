@@ -64,8 +64,8 @@ export const AddCriterionDialog = ({
 }: AddCriterionDialogProps) => {
   const [name, setName] = useState("");
   const [criteriaType, setCriteriaType] = useState<CriteriaType>("yes-no");
-  const [context, setContext] = useState<string>("");
-  const [branchTag, setBranchTag] = useState("");
+  const [selectedContexts, setSelectedContexts] = useState<Set<string>>(new Set());
+  const [branchTagsByContext, setBranchTagsByContext] = useState<Record<string, string>>({});
   const [contentType, setContentType] = useState<ContentType | "">("");
   const [category, setCategory] = useState<string>("");
   const [definition, setDefinition] = useState("");
@@ -106,8 +106,8 @@ export const AddCriterionDialog = ({
   const resetForm = () => {
     setName("");
     setCriteriaType("yes-no");
-    setContext("");
-    setBranchTag("");
+    setSelectedContexts(new Set());
+    setBranchTagsByContext({});
     setContentType("");
     setCategory("");
     setDefinition("");
@@ -132,15 +132,8 @@ export const AddCriterionDialog = ({
     setBucketExamples({ "0": [""], "1": [""], "2": [""], "3+": [""] });
   };
 
-  const requiresBranch = context === "Brand" || context === "Industry" || context === "Marketplace";
-  const selectedBranchType =
-    context === "Brand"
-      ? "brands"
-      : context === "Industry"
-        ? "industries"
-        : context === "Marketplace"
-          ? "marketplaces"
-          : null;
+  const selectedContextList = [...selectedContexts];
+  const branchContexts = selectedContextList.filter((context) => context === "Brand" || context === "Industry" || context === "Marketplace");
 
   useEffect(() => {
     if (!open) return;
@@ -152,7 +145,7 @@ export const AddCriterionDialog = ({
 
     setName(initialCriterion.criteria_name);
     setCriteriaType(initialCriterion.criteria_type);
-    setContext(initialCriterion.context);
+    setSelectedContexts(new Set([initialCriterion.context]));
     setContentType(initialCriterion.content_type);
     setCategory(initialCriterion.criteria_category);
     setDefinition(initialCriterion.criteria_definition);
@@ -160,13 +153,13 @@ export const AddCriterionDialog = ({
     setShowTagValidation(false);
 
     if (initialCriterion.context === "Brand") {
-      setBranchTag(initialCriterion.brand_tag || initialCriterion.custom_tags?.Brand?.[0] || "");
+      setBranchTagsByContext({ Brand: initialCriterion.brand_tag || initialCriterion.custom_tags?.Brand?.[0] || "" });
     } else if (initialCriterion.context === "Industry") {
-      setBranchTag(initialCriterion.industry_tag || initialCriterion.custom_tags?.Industry?.[0] || "");
+      setBranchTagsByContext({ Industry: initialCriterion.industry_tag || initialCriterion.custom_tags?.Industry?.[0] || "" });
     } else if (initialCriterion.context === "Marketplace") {
-      setBranchTag(initialCriterion.marketplace_tag || initialCriterion.custom_tags?.Marketplace?.[0] || "");
+      setBranchTagsByContext({ Marketplace: initialCriterion.marketplace_tag || initialCriterion.custom_tags?.Marketplace?.[0] || "" });
     } else {
-      setBranchTag("");
+      setBranchTagsByContext({});
     }
 
     if (initialCriterion.criteria_type === "yes-no") {
@@ -216,11 +209,21 @@ export const AddCriterionDialog = ({
 
   useEffect(() => {
     if (!open) return;
-    if (context && !contextOptions.includes(context)) setContext("");
+    const validContexts = selectedContextList.filter((context) => contextOptions.includes(context));
+    if (validContexts.length !== selectedContextList.length) {
+      setSelectedContexts(new Set(validContexts));
+    }
     if (contentType && !contentTypeOptions.includes(contentType)) setContentType("");
-    const activeCategories = requiresBranch && branchTag
-      ? criteriaCategoriesByContextBranchAndContentType[context]?.[branchTag]?.[contentType] || []
-      : criteriaCategoriesByContextAndContentType[context]?.[contentType] || [];
+    const activeCategories = validContexts.length > 0 && contentType
+      ? validContexts.reduce<string[]>((acc, activeContext, index) => {
+          const branchTag = branchTagsByContext[activeContext];
+          const nextCategories =
+            (activeContext === "Brand" || activeContext === "Industry" || activeContext === "Marketplace") && branchTag
+              ? criteriaCategoriesByContextBranchAndContentType[activeContext]?.[branchTag]?.[contentType] || []
+              : criteriaCategoriesByContextAndContentType[activeContext]?.[contentType] || [];
+          return index === 0 ? nextCategories : acc.filter((item) => nextCategories.includes(item));
+        }, [])
+      : [];
     if (
       contentType &&
       category &&
@@ -230,11 +233,10 @@ export const AddCriterionDialog = ({
     }
   }, [
     open,
-    context,
+    selectedContextList,
     contentType,
     category,
-    branchTag,
-    requiresBranch,
+    branchTagsByContext,
     contextOptions,
     contentTypeOptions,
     criteriaCategoriesByContextAndContentType,
@@ -249,16 +251,26 @@ export const AddCriterionDialog = ({
     setAddTagOpen(true);
   };
 
-  const handleContextChange = (value: string) => {
-    if (value === context) return;
-    setContext(value);
-    setBranchTag("");
-    if (contentType) {
-      const nextCategoryOptions = criteriaCategoriesByContextAndContentType[value]?.[contentType] || [];
-      if (!nextCategoryOptions.includes(category)) setCategory("");
-    } else {
-      setCategory("");
+  const handleContextToggle = (value: string) => {
+    if (initialCriterion) {
+      setSelectedContexts(new Set([value]));
+      return;
     }
+
+    setSelectedContexts((prev) => {
+      const next = new Set(prev);
+      if (next.has(value)) next.delete(value);
+      else next.add(value);
+      return next;
+    });
+    setBranchTagsByContext((prev) => {
+      if (value !== "Brand" && value !== "Industry" && value !== "Marketplace") return prev;
+      if (!selectedContexts.has(value)) return prev;
+      const next = { ...prev };
+      delete next[value];
+      return next;
+    });
+    setCategory("");
   };
 
   const handleAddTagSubmit = () => {
@@ -267,7 +279,10 @@ export const AddCriterionDialog = ({
 
     if (addTagTarget.type === "branch") {
       onAddBranchTag(addTagTarget.branchType, tag);
-      setBranchTag(tag);
+      setBranchTagsByContext((prev) => ({
+        ...prev,
+        [addTagTarget.branchType === "brands" ? "Brand" : addTagTarget.branchType === "industries" ? "Industry" : "Marketplace"]: tag,
+      }));
     } else {
       onAddCategoryForContextAndContentType(addTagTarget.context, addTagTarget.contentType, tag, addTagTarget.branchTag);
       setCategory(tag);
@@ -341,26 +356,24 @@ export const AddCriterionDialog = ({
     }));
   };
 
-  const branchLabel =
-    selectedBranchType === "brands"
-      ? "Brand"
-      : selectedBranchType === "industries"
-        ? "Industry"
-        : selectedBranchType === "marketplaces"
-          ? "Marketplace"
-          : "";
-  const branchOptions = selectedBranchType ? branchTags[selectedBranchType] || [] : [];
-  const categoryOptions = context && contentType
-    ? (requiresBranch && branchTag
-      ? criteriaCategoriesByContextBranchAndContentType[context]?.[branchTag]?.[contentType] || []
-      : criteriaCategoriesByContextAndContentType[context]?.[contentType] || [])
+  const getBranchTypeForContext = (context: string) =>
+    context === "Brand" ? "brands" : context === "Industry" ? "industries" : context === "Marketplace" ? "marketplaces" : null;
+  const categoryOptions = selectedContextList.length > 0 && contentType
+    ? selectedContextList.reduce<string[]>((acc, activeContext, index) => {
+        const branchTag = branchTagsByContext[activeContext];
+        const nextCategories =
+          (activeContext === "Brand" || activeContext === "Industry" || activeContext === "Marketplace") && branchTag
+            ? criteriaCategoriesByContextBranchAndContentType[activeContext]?.[branchTag]?.[contentType] || []
+            : criteriaCategoriesByContextAndContentType[activeContext]?.[contentType] || [];
+        return index === 0 ? nextCategories : acc.filter((item) => nextCategories.includes(item));
+      }, [])
     : [];
   const canSubmit =
     !!name.trim() &&
-    !!context.trim() &&
+    selectedContextList.length > 0 &&
     !!contentType.trim() &&
     !!category.trim() &&
-    (!requiresBranch || !!branchTag.trim());
+    branchContexts.every((context) => !!branchTagsByContext[context]?.trim());
 
   const buildEvalDefinition = () => {
     if (criteriaType === "yes-no") {
@@ -406,29 +419,36 @@ export const AddCriterionDialog = ({
     }
 
     const now = new Date().toISOString();
-    const criterion: Criterion = {
-      id: initialCriterion?.id || name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, ""),
-      customer: undefined,
-      brand: undefined,
-      context,
-      brand_tag: context === "Brand" ? branchTag : undefined,
-      industry_tag: context === "Industry" ? branchTag : undefined,
-      marketplace_tag: context === "Marketplace" ? branchTag : undefined,
-      content_type: contentType,
-      criteria_category: category,
-      criteria_name: name,
-      criteria_definition: definition,
-      criteria_type: criteriaType,
-      eval_definition: buildEvalDefinition() as Criterion["eval_definition"],
-      custom_tags: initialCriterion?.custom_tags,
-      weight: Number(weight) || 1,
-      active: initialCriterion?.active ?? true,
-      created_at: initialCriterion?.created_at || now,
-      updated_at: now,
-    };
+    const baseId = name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+    const criteriaToSave: Criterion[] = selectedContextList.map((context, index) => {
+      const branchTag = branchTagsByContext[context];
+      return {
+        id: initialCriterion?.id || (selectedContextList.length === 1 ? baseId : `${baseId}-${context.toLowerCase()}`),
+        customer: undefined,
+        brand: undefined,
+        context,
+        brand_tag: context === "Brand" ? branchTag : undefined,
+        industry_tag: context === "Industry" ? branchTag : undefined,
+        marketplace_tag: context === "Marketplace" ? branchTag : undefined,
+        content_type: contentType,
+        criteria_category: category,
+        criteria_name: name,
+        criteria_definition: definition,
+        criteria_type: criteriaType,
+        eval_definition: buildEvalDefinition() as Criterion["eval_definition"],
+        custom_tags: initialCriterion?.custom_tags,
+        weight: Number(weight) || 1,
+        active: initialCriterion?.active ?? true,
+        created_at: initialCriterion?.created_at || now,
+        updated_at: now,
+      };
+    });
 
-    if (initialCriterion && onUpdate) onUpdate(criterion);
-    else onAdd(criterion);
+    if (initialCriterion && onUpdate) {
+      onUpdate(criteriaToSave[0]);
+    } else {
+      criteriaToSave.forEach((criterion) => onAdd(criterion));
+    }
 
     resetForm();
     onOpenChange(false);
@@ -467,62 +487,66 @@ export const AddCriterionDialog = ({
                     <Button
                       key={option}
                       type="button"
-                      variant={context === option ? "default" : "outline"}
-                      onClick={() => handleContextChange(option)}
+                      variant={selectedContexts.has(option) ? "default" : "outline"}
+                      onClick={() => handleContextToggle(option)}
                     >
                       {option}
                     </Button>
                   ))}
                 </div>
-                {showTagValidation && !context && (
+                {showTagValidation && selectedContextList.length === 0 && (
                   <p className="text-xs text-destructive">Context is required.</p>
                 )}
               </div>
 
-              {requiresBranch && selectedBranchType && (
-                <div className="space-y-1.5">
-                  <Label>{branchLabel}</Label>
-                  <Select
-                    value={branchTag || "__none__"}
-                    onValueChange={(value) => {
-                      if (isAddTagValue(value)) {
-                        openAddTagDialog({ type: "branch", branchType: selectedBranchType });
-                        return;
-                      }
-                      setBranchTag(value === "__none__" ? "" : value);
-                    }}
-                  >
-                    <SelectTrigger><SelectValue placeholder={`Select ${branchLabel}`} /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">Select {branchLabel}</SelectItem>
-                      {branchOptions.map((option) => <SelectItem key={option} value={option}>{option}</SelectItem>)}
-                      <SelectSeparator />
-                      <SelectItem value={`__add_tag__${selectedBranchType}`}>+ Add {branchLabel} tag</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  {showTagValidation && !branchTag && (
-                    <p className="text-xs text-destructive">{branchLabel} is required for {context} context.</p>
-                  )}
-                </div>
-              )}
+              {branchContexts.map((context) => {
+                const branchType = getBranchTypeForContext(context);
+                if (!branchType) return null;
+                const branchLabel = context;
+                const branchOptions = branchTags[branchType] || [];
+
+                return (
+                  <div key={context} className="space-y-1.5">
+                    <Label>{branchLabel}</Label>
+                    <Select
+                      value={branchTagsByContext[context] || "__none__"}
+                      onValueChange={(value) => {
+                        if (isAddTagValue(value)) {
+                          openAddTagDialog({ type: "branch", branchType });
+                          return;
+                        }
+                        setBranchTagsByContext((prev) => ({
+                          ...prev,
+                          [context]: value === "__none__" ? "" : value,
+                        }));
+                        setCategory("");
+                      }}
+                    >
+                      <SelectTrigger><SelectValue placeholder={`Select ${branchLabel}`} /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none__">Select {branchLabel}</SelectItem>
+                        {branchOptions.map((option) => <SelectItem key={`${context}-${option}`} value={option}>{option}</SelectItem>)}
+                        <SelectSeparator />
+                        <SelectItem value={`__add_tag__${branchType}`}>+ Add {branchLabel} tag</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {showTagValidation && !branchTagsByContext[context] && (
+                      <p className="text-xs text-destructive">{branchLabel} is required for {context} context.</p>
+                    )}
+                  </div>
+                );
+              })}
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <Label>Content Type</Label>
                   <Select
                     value={contentType || "__none__"}
-                    disabled={!context || (requiresBranch && !branchTag)}
+                    disabled={selectedContextList.length === 0 || branchContexts.some((context) => !branchTagsByContext[context])}
                     onValueChange={(value) => {
                       const nextContentType = value === "__none__" ? "" : value;
-                      const nextCategoryOptions = nextContentType
-                        ? (requiresBranch && branchTag
-                          ? criteriaCategoriesByContextBranchAndContentType[context]?.[branchTag]?.[nextContentType] || []
-                          : criteriaCategoriesByContextAndContentType[context]?.[nextContentType] || [])
-                        : [];
                       setContentType(nextContentType);
-                      if (!nextContentType || !nextCategoryOptions.includes(category)) {
-                        setCategory("");
-                      }
+                      setCategory("");
                     }}
                   >
                     <SelectTrigger><SelectValue placeholder="Select content type" /></SelectTrigger>
@@ -539,15 +563,16 @@ export const AddCriterionDialog = ({
                   <Label>Category</Label>
                   <Select
                     value={category || "__none__"}
-                    disabled={!context || !contentType}
+                    disabled={selectedContextList.length === 0 || !contentType}
                     onValueChange={(value) => {
                       if (isAddTagValue(value)) {
-                        if (context && contentType) {
+                        const primaryContext = selectedContextList[0];
+                        if (primaryContext && contentType) {
                           openAddTagDialog({
                             type: "category",
-                            context,
+                            context: primaryContext,
                             contentType,
-                            branchTag: requiresBranch ? branchTag : undefined,
+                            branchTag: branchTagsByContext[primaryContext] || undefined,
                           });
                         }
                         return;
