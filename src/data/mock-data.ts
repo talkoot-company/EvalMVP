@@ -704,6 +704,22 @@ export const MOCK_COPIES: ProductCopy[] = [
     created_at: "2025-02-12T10:00:00Z",
     updated_at: "2025-02-12T10:00:00Z",
   },
+  {
+    id: "copy-5",
+    product_name: "ZenFlex Travel Yoga Mat",
+    content_type: "Title",
+    raw_text: "ZenFlex Travel Yoga Mat - Foldable, Lightweight, Non-Slip Texture, 4mm Cushion",
+    created_at: "2025-02-18T08:45:00Z",
+    updated_at: "2025-02-18T08:45:00Z",
+  },
+  {
+    id: "copy-6",
+    product_name: "ZenFlex Studio Grip Yoga Mat",
+    content_type: "Title",
+    raw_text: "ZenFlex Studio Grip Yoga Mat - Extra Long, Non-Slip Surface, 8mm Support, Carry Strap",
+    created_at: "2025-02-18T08:50:00Z",
+    updated_at: "2025-02-18T08:50:00Z",
+  },
 ];
 
 const CONTEXT_ORDER = ["Universal", "Industry", "Marketplace", "Brand"];
@@ -974,6 +990,8 @@ const buildVariantScores = (scores: EvalRun["criterion_scores"]): EvalRun["crite
 
 const RUN_1_VARIANT_CRITERION_SCORES = buildVariantScores(RUN_1_CRITERION_SCORES);
 const RUN_3_CRITERION_SCORES = buildVariantScores(RUN_2_CRITERION_SCORES);
+const RUN_3_VARIANT_A_CRITERION_SCORES = buildVariantScores(RUN_3_CRITERION_SCORES);
+const RUN_3_VARIANT_B_CRITERION_SCORES = buildVariantScores(RUN_3_VARIANT_A_CRITERION_SCORES);
 
 export const MOCK_RUNS: EvalRun[] = [
   {
@@ -1083,6 +1101,41 @@ export const MOCK_RUNS: EvalRun[] = [
     },
     criterion_scores: RUN_3_CRITERION_SCORES,
     ...buildHierarchyForRun(RUN_3_CRITERION_SCORES),
+    product_results: [
+      {
+        product_copy_id: "copy-3",
+        overall_score: 77,
+        category_scores: {
+          "Product Identification": 72,
+          "Relevant Product Attributes": 78,
+          "Claim Integrity": 69,
+        },
+        criterion_scores: RUN_3_CRITERION_SCORES,
+        ...buildHierarchyForRun(RUN_3_CRITERION_SCORES),
+      },
+      {
+        product_copy_id: "copy-5",
+        overall_score: 71,
+        category_scores: {
+          "Product Identification": 68,
+          "Relevant Product Attributes": 74,
+          "Claim Integrity": 66,
+        },
+        criterion_scores: RUN_3_VARIANT_A_CRITERION_SCORES,
+        ...buildHierarchyForRun(RUN_3_VARIANT_A_CRITERION_SCORES),
+      },
+      {
+        product_copy_id: "copy-6",
+        overall_score: 83,
+        category_scores: {
+          "Product Identification": 81,
+          "Relevant Product Attributes": 84,
+          "Claim Integrity": 74,
+        },
+        criterion_scores: RUN_3_VARIANT_B_CRITERION_SCORES,
+        ...buildHierarchyForRun(RUN_3_VARIANT_B_CRITERION_SCORES),
+      },
+    ],
     input_summary: {
       source: "import",
       import_file_name: "zenflex-listings-q1.json",
@@ -1092,6 +1145,20 @@ export const MOCK_RUNS: EvalRun[] = [
           entries: [
             { content_type: "Title", raw_text: "ZenFlex Premium Yoga Mat - Non-Slip Grip, 6mm Cushion, Carry Strap" },
             { content_type: "Description", raw_text: "Imported listing copy for flexibility, grip confidence, and long-session comfort." },
+          ],
+        },
+        {
+          product_name: "ZenFlex Travel Yoga Mat",
+          entries: [
+            { content_type: "Title", raw_text: "ZenFlex Travel Yoga Mat - Foldable, Lightweight, Non-Slip Texture, 4mm Cushion" },
+            { content_type: "Description", raw_text: "Compact travel mat focused on packability, surface grip, and quick setup for classes on the go." },
+          ],
+        },
+        {
+          product_name: "ZenFlex Studio Grip Yoga Mat",
+          entries: [
+            { content_type: "Title", raw_text: "ZenFlex Studio Grip Yoga Mat - Extra Long, Non-Slip Surface, 8mm Support, Carry Strap" },
+            { content_type: "Description", raw_text: "Studio-ready yoga mat designed for longer sessions, added cushioning, and dependable traction." },
           ],
         },
       ],

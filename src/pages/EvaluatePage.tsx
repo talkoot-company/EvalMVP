@@ -45,6 +45,27 @@ interface HierarchyScoreSource {
   root_node_ids?: string[];
 }
 
+type RunProductResults = NonNullable<EvalRun["product_results"]>;
+
+type RunProductResultWithKey = RunProductResults[number] & {
+  _key: string;
+};
+
+interface CriteriaFirstRow {
+  productKey: string;
+  productName: string;
+  score: number;
+  normalizedScore: number;
+  reasoning: string;
+  isAggregate?: boolean;
+}
+
+interface CriteriaFirstGroup {
+  criterionId: string;
+  criterion: Criterion | undefined;
+  rows: CriteriaFirstRow[];
+}
+
 const CONTEXT_ORDER = ["Universal", "Industry", "Marketplace", "Brand"];
 
 const TALKOOT_CONNECT_OPTIONS = {
@@ -145,6 +166,7 @@ const EvaluatePage = () => {
   const [historyBrandFilter, setHistoryBrandFilter] = useState("all");
   const [historySuiteFilter, setHistorySuiteFilter] = useState("all");
   const [historySortBy, setHistorySortBy] = useState<"date_desc" | "date_asc" | "title_asc" | "title_desc">("date_desc");
+  const [historyView, setHistoryView] = useState<"criteria" | "hierarchy">("criteria");
   const [isNewEvaluationRunOpen, setIsNewEvaluationRunOpen] = useState(true);
   const [selectionMode, setSelectionMode] = useState<string>("suite");
 
@@ -1044,7 +1066,7 @@ const EvaluatePage = () => {
     );
   };
 
-  const getRunProducts = (run: EvalRun) => {
+  const getRunProducts = (run: EvalRun): RunProductResultWithKey[] => {
     if (run.product_results && run.product_results.length > 0) {
       return run.product_results.map((result, index) => ({
         ...result,
@@ -1217,12 +1239,120 @@ const EvaluatePage = () => {
     };
   };
 
+  const getProductDisplayName = (product: RunProductResultWithKey) => {
+    const productCopy = MOCK_COPIES.find((candidate) => candidate.id === product.product_copy_id);
+    return productCopy?.product_name || product.product_copy_id;
+  };
+
+  const buildCriteriaFirstGroups = (
+    products: RunProductResultWithKey[],
+    aggregate: ReturnType<typeof buildAllProductsAggregate>,
+  ): CriteriaFirstGroup[] => {
+    const criterionIdsInOrder: string[] = [];
+    const seenCriterionIds = new Set<string>();
+
+    products.forEach((product) => {
+      product.criterion_scores.forEach((entry) => {
+        if (!seenCriterionIds.has(entry.criterion_id)) {
+          seenCriterionIds.add(entry.criterion_id);
+          criterionIdsInOrder.push(entry.criterion_id);
+        }
+      });
+    });
+
+    return criterionIdsInOrder.map((criterionId) => {
+      const criterion = criterionById.get(criterionId);
+      const rows: CriteriaFirstRow[] = products.flatMap((product) => {
+        const scoreEntry = product.criterion_scores.find((entry) => entry.criterion_id === criterionId);
+        if (!scoreEntry) return [];
+        return [{
+          productKey: product._key,
+          productName: getProductDisplayName(product),
+          score: scoreEntry.score,
+          normalizedScore: scoreEntry.normalized_score,
+          reasoning: scoreEntry.reasoning,
+        }];
+      });
+
+      if (aggregate) {
+        const aggregateScore = aggregate.criterion_scores.find((entry) => entry.criterion_id === criterionId);
+        if (aggregateScore) {
+          rows.push({
+            productKey: "all-products",
+            productName: "All Products",
+            score: aggregateScore.score,
+            normalizedScore: aggregateScore.normalized_score,
+            reasoning: aggregateScore.reasoning,
+            isAggregate: true,
+          });
+        }
+      }
+
+      return {
+        criterionId,
+        criterion,
+        rows,
+      };
+    });
+  };
+
+  const renderCriteriaFirstProductList = (
+    products: RunProductResultWithKey[],
+    listKeyPrefix: string,
+  ) => {
+    const aggregate = buildAllProductsAggregate(products);
+    const groups = buildCriteriaFirstGroups(products, aggregate);
+
+    return (
+      <div className="space-y-3 w-full max-w-[1600px] mx-auto">
+        {groups.map((group) => (
+          <div key={`${listKeyPrefix}::criterion::${group.criterionId}`} className="rounded-md border">
+            <div className="flex flex-wrap items-center gap-2 border-b bg-muted/20 px-3 py-2">
+              <span className="text-sm font-semibold">{group.criterion?.criteria_name || group.criterionId}</span>
+              {group.criterion ? <CriteriaTypeBadge type={group.criterion.criteria_type} /> : null}
+              {group.criterion ? (
+                <Badge variant="outline" className="text-[10px] font-medium min-w-[62px] justify-center tabular-nums">
+                  Wt: {toWeightTier(group.criterion.weight)}
+                </Badge>
+              ) : null}
+            </div>
+            <div className="space-y-0 divide-y">
+              {group.rows.map((row) => (
+                <div
+                  key={`${listKeyPrefix}::criterion-row::${group.criterionId}::${row.productKey}`}
+                  className={`grid grid-cols-1 gap-2 px-3 py-2 lg:grid-cols-[220px_110px_140px_minmax(0,1fr)] lg:items-center ${row.isAggregate ? "bg-muted/20" : ""}`}
+                >
+                  <div className="min-w-0">
+                    <span className={`text-sm font-medium truncate block ${row.isAggregate ? "text-[#1f3b67]" : ""}`}>
+                      {row.productName}
+                    </span>
+                  </div>
+                  <div className="inline-flex items-center">
+                    {group.criterion
+                      ? renderCriterionBadge(group.criterion, row.score, row.normalizedScore)
+                      : renderFallbackCriterionBadge(row.normalizedScore)}
+                  </div>
+                  <div className="min-w-0">
+                    <ScoreBar score={row.normalizedScore} size="sm" showLabel />
+                  </div>
+                  <div className="min-w-0 text-xs text-muted-foreground">
+                    <span className="block truncate lg:whitespace-normal">"{row.reasoning}"</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   const renderVersion1ProductList = (
-    products: Array<ReturnType<typeof getRunProducts>[number]>,
+    products: RunProductResultWithKey[],
     listKeyPrefix: string,
     defaultExpandFirst = false,
   ) => (
-    <div className="space-y-2 w-full max-w-[1600px] mx-auto">
+      <div className="space-y-2 w-full max-w-[1600px] mx-auto">
       {(() => {
         const aggregate = buildAllProductsAggregate(products);
         if (!aggregate) return null;
@@ -1910,50 +2040,60 @@ const EvaluatePage = () => {
       <div className="space-y-3">
         <h2 className="text-lg font-semibold">Evaluation History</h2>
         <Card className="shadow-card">
-          <CardContent className="p-3 grid grid-cols-1 md:grid-cols-4 gap-2">
-            <Input
-              className="h-9"
-              placeholder="Search evaluation title"
-              value={historyTitleQuery}
-              onChange={(event) => setHistoryTitleQuery(event.target.value)}
-            />
-            <Select value={historyBrandFilter} onValueChange={setHistoryBrandFilter}>
-              <SelectTrigger className="h-9">
-                <SelectValue placeholder="Filter by brand" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All brands</SelectItem>
-                {historyBrandOptions.map((brand) => (
-                  <SelectItem key={`history-brand-${brand}`} value={brand}>
-                    {brand}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={historySuiteFilter} onValueChange={setHistorySuiteFilter}>
-              <SelectTrigger className="h-9">
-                <SelectValue placeholder="Filter by suite" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All suites</SelectItem>
-                {historySuiteOptions.map((suite) => (
-                  <SelectItem key={`history-suite-${suite.id}`} value={suite.id}>
-                    {suite.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={historySortBy} onValueChange={(value) => setHistorySortBy(value as "date_desc" | "date_asc" | "title_asc" | "title_desc")}>
-              <SelectTrigger className="h-9">
-                <SelectValue placeholder="Sort by" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="date_desc">Date: Most Recent to Oldest</SelectItem>
-                <SelectItem value="date_asc">Date: Oldest to Most Recent</SelectItem>
-                <SelectItem value="title_asc">Title: A to Z</SelectItem>
-                <SelectItem value="title_desc">Title: Z to A</SelectItem>
-              </SelectContent>
-            </Select>
+          <CardContent className="p-3 space-y-2">
+            <div className="flex items-center justify-end">
+              <Tabs value={historyView} onValueChange={(value) => setHistoryView(value as "criteria" | "hierarchy")}>
+                <TabsList className="h-9">
+                  <TabsTrigger value="criteria">Criteria First</TabsTrigger>
+                  <TabsTrigger value="hierarchy">Hierarchy</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+              <Input
+                className="h-9"
+                placeholder="Search evaluation title"
+                value={historyTitleQuery}
+                onChange={(event) => setHistoryTitleQuery(event.target.value)}
+              />
+              <Select value={historyBrandFilter} onValueChange={setHistoryBrandFilter}>
+                <SelectTrigger className="h-9">
+                  <SelectValue placeholder="Filter by brand" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All brands</SelectItem>
+                  {historyBrandOptions.map((brand) => (
+                    <SelectItem key={`history-brand-${brand}`} value={brand}>
+                      {brand}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={historySuiteFilter} onValueChange={setHistorySuiteFilter}>
+                <SelectTrigger className="h-9">
+                  <SelectValue placeholder="Filter by suite" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All suites</SelectItem>
+                  {historySuiteOptions.map((suite) => (
+                    <SelectItem key={`history-suite-${suite.id}`} value={suite.id}>
+                      {suite.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={historySortBy} onValueChange={(value) => setHistorySortBy(value as "date_desc" | "date_asc" | "title_asc" | "title_desc")}>
+                <SelectTrigger className="h-9">
+                  <SelectValue placeholder="Sort by" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="date_desc">Date: Most Recent to Oldest</SelectItem>
+                  <SelectItem value="date_asc">Date: Oldest to Most Recent</SelectItem>
+                  <SelectItem value="title_asc">Title: A to Z</SelectItem>
+                  <SelectItem value="title_desc">Title: Z to A</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </CardContent>
         </Card>
         {filteredHistoryRuns.length === 0 ? (
@@ -1983,7 +2123,9 @@ const EvaluatePage = () => {
                   </p>
                 </div>
                 {renderRunInputExpandedContent(run)}
-                {renderVersion1ProductList(runProducts, `${run.id}::history`, index === 0)}
+                {historyView === "criteria"
+                  ? renderCriteriaFirstProductList(runProducts, `${run.id}::history`)
+                  : renderVersion1ProductList(runProducts, `${run.id}::history`, index === 0)}
               </CardContent>
             </Card>
           );
