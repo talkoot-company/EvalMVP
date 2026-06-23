@@ -28,16 +28,17 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Plus, ChevronDown, ChevronRight, Pencil, Trash2 } from "lucide-react";
 import { deriveCategoriesFromCriteria } from "@/config/hierarchy";
 import type { EvalSuite } from "@/types";
-import { loadManagedTaxonomy, loadRuntimeCriteria } from "@/data/runtime-taxonomy";
+import { buildDefaultTaxonomy } from "@/data/runtime-taxonomy";
 import { loadRuntimeSuites, saveRuntimeSuites } from "@/data/runtime-suites";
+import { useCriteria } from "@/hooks/useCriteria";
 
 const areSetsEqual = (left: Set<string>, right: Set<string>) =>
   left.size === right.size && [...left].every((value) => right.has(value));
 
 const SuitesPage = () => {
   const [suites, setSuites] = useState<EvalSuite[]>(() => loadRuntimeSuites());
-  const runtimeCriteria = useMemo(() => loadRuntimeCriteria(), []);
-  const runtimeTaxonomy = useMemo(() => loadManagedTaxonomy(runtimeCriteria), [runtimeCriteria]);
+  const { data: runtimeCriteria = [] } = useCriteria();
+  const runtimeTaxonomy = useMemo(() => buildDefaultTaxonomy(runtimeCriteria), [runtimeCriteria]);
   const [newSuiteOpen, setNewSuiteOpen] = useState(false);
   const [editingSuiteId, setEditingSuiteId] = useState<string | null>(null);
   const [deletingSuiteId, setDeletingSuiteId] = useState<string | null>(null);

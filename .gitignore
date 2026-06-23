@@ -11,6 +11,20 @@ node_modules
 dist
 dist-ssr
 *.local
+.env
+.env.docker
+
+# Generated data bootstrap/export zips (large, regenerate via Data → Export)
+evalmvp-*.zip
+
+# Large local datasets — only generations_output.csv and the criteria Excel
+# file are read by the app (db/seed.py); the rest never belongs in git
+data/cocacola_extracted/
+data/generations_coke/
+data/*.zip
+db/evals.db
+server/results/
+__pycache__/
 
 # Editor directories and files
 .vscode/*
@@ -22,3 +36,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+data/*.json
+evalmvp-data-bootstrap/*
+data/

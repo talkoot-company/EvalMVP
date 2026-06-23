@@ -55,6 +55,7 @@ export interface Criterion {
   custom_tags?: Record<string, string[]>;
   weight: number;
   active: boolean;
+  notes?: string;
   created_at: string;
   updated_at: string;
 }

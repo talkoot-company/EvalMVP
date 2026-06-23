@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { MOCK_RUNS, MOCK_COPIES, MOCK_SUITES, MOCK_CRITERIA } from "@/data/mock-data";
+import { MOCK_RUNS, MOCK_COPIES, MOCK_SUITES } from "@/data/mock-data";
 import { ScoreBar } from "@/components/ScoreDisplay";
 import { CriteriaTypeBadge } from "@/components/CriteriaTypeBadge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,7 +21,8 @@ import { Play, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Plus, Trash2
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CONTENT_TYPES, deriveCategoriesFromCriteria } from "@/config/hierarchy";
 import type { EvalRun, Criterion, ContentType, EvalRunScoreNode } from "@/types";
-import { loadManagedTaxonomy, loadRuntimeCriteria } from "@/data/runtime-taxonomy";
+import { buildDefaultTaxonomy } from "@/data/runtime-taxonomy";
+import { useCriteria } from "@/hooks/useCriteria";
 
 interface ContentEntry {
   id: number;
@@ -101,8 +102,8 @@ const EvaluatePage = () => {
   const [isNewEvaluationRunOpen, setIsNewEvaluationRunOpen] = useState(true);
   const [selectionMode, setSelectionMode] = useState<string>("suite");
 
-  const runtimeCriteria = useMemo(() => loadRuntimeCriteria(), []);
-  const runtimeTaxonomy = useMemo(() => loadManagedTaxonomy(runtimeCriteria), [runtimeCriteria]);
+  const { data: runtimeCriteria = [] } = useCriteria();
+  const runtimeTaxonomy = useMemo(() => buildDefaultTaxonomy(runtimeCriteria), [runtimeCriteria]);
   const allCriteria: Criterion[] = runtimeCriteria;
   // Hierarchy-based selection
   const [selectedContexts, setSelectedContexts] = useState<Set<string>>(() => new Set(runtimeTaxonomy.contexts));
@@ -505,7 +506,6 @@ const EvaluatePage = () => {
 
   const criterionById = useMemo(() => {
     const map = new Map<string, Criterion>();
-    MOCK_CRITERIA.forEach((criterion) => map.set(criterion.id, criterion));
     allCriteria.forEach((criterion) => map.set(criterion.id, criterion));
     return map;
   }, [allCriteria]);
