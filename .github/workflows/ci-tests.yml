@@ -1,0 +1,48 @@
+name: CI — Tests & Coverage
+
+# GitHub equivalent of the Azure DevOps "Tests" and "Code Coverage" summary tabs:
+# runs Vitest with coverage and surfaces the results in the run's job summary
+# (and as a comment on pull requests).
+
+on:
+  pull_request:
+  push:
+    branches:
+      - evals_test
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write # post the coverage report as a PR comment
+  checks: write # publish the test results check
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Test & Coverage
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests with coverage
+        run: npx vitest run --coverage --reporter=default --reporter=junit --outputFile=test-report.junit.xml
+
+      - name: Publish coverage report (job summary + PR comment)
+        if: always() # report even when tests fail (reportOnFailure is on)
+        uses: davelosert/vitest-coverage-report-action@v2
+
+      - name: Publish test results (job summary)
+        if: always()
+        uses: dorny/test-reporter@v2
+        with:
+          name: Vitest
+          path: test-report.junit.xml
+          reporter: java-junit
