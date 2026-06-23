@@ -1,4 +1,4 @@
-import { NavLink as RouterNavLink, useLocation } from "react-router-dom";
+import { NavLink as RouterNavLink, useLocation, useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import {
   ListChecks,
@@ -7,10 +7,12 @@ import {
   Sparkles,
   GitFork,
   Database,
+  LogOut,
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
 import { useState } from "react";
+import { logout } from "@/lib/auth";
 
 const activeItems = [
   { to: "/criteria",    icon: ListChecks, label: "Criteria" },
@@ -47,6 +49,7 @@ function NavItem({ to, icon: Icon, label, collapsed }: {
 
 export function AppSidebar() {
   const [collapsed, setCollapsed] = useState(false);
+  const navigate = useNavigate();
 
   return (
     <aside className={cn(
@@ -92,6 +95,16 @@ export function AppSidebar() {
 
       {/* Footer */}
       <div className="border-t border-sidebar-border">
+        <button
+          onClick={() => { logout(); navigate("/login", { replace: true }); }}
+          className={cn(
+            "w-full flex items-center gap-3 px-3 py-2 text-sm font-medium text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors",
+            collapsed ? "justify-center" : "justify-start",
+          )}
+        >
+          <LogOut className="h-4 w-4 shrink-0" />
+          {!collapsed && <span>Logout</span>}
+        </button>
         <button
           onClick={() => setCollapsed(!collapsed)}
           className="w-full flex items-center justify-center border-t border-sidebar-border p-3 text-sidebar-muted hover:text-sidebar-foreground transition-colors"
