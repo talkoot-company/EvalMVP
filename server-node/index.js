@@ -1,11 +1,11 @@
 // CLI entry: runs the EvalMVP API for local development (and simple single-process
 // production via startServer's optional staticDir).
 //
-// Backend is selected with DB_BACKEND:
-//   sqlite (default) — local file db/evals.db
-//   mssql            — SQL Server temp tables in dev-golfcarts
-//                      (uses SQL_SERVER_CONNSTRING from env/.env; prefix via
-//                       MSSQL_TABLE_PREFIX, default temp_Brian_)
+// Backend is selected with DB_BACKEND (default mssql, both local and in-container):
+//   mssql (default) — SQL Server temp tables in dev-golfcarts
+//                     (uses SQL_SERVER_CONNSTRING from .env/.env.docker; prefix via
+//                      MSSQL_TABLE_PREFIX, default temp_Brian_)
+//   sqlite          — local file db/evals.db (opt-in: DB_BACKEND=sqlite)
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,7 +40,7 @@ function rawConnstring() {
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const PORT = Number(process.env.API_PORT || (IS_PRODUCTION ? process.env.PORT : undefined) || 8000);
 const HOST = process.env.HOST || (IS_PRODUCTION ? "0.0.0.0" : "127.0.0.1");
-const BACKEND = (process.env.DB_BACKEND || "sqlite").toLowerCase();
+const BACKEND = (process.env.DB_BACKEND || "mssql").toLowerCase();
 const RESULTS_DIR = path.join(ROOT, "server", "results");
 const SERVE_STATIC = process.env.SERVE_STATIC === "true" || IS_PRODUCTION;
 const STATIC_DIR = SERVE_STATIC ? path.join(ROOT, "dist") : null;
@@ -82,8 +82,8 @@ try {
     console.error(`ERROR: could not connect to the SQL Server backend (DB_BACKEND=mssql).`);
     console.error(`  ${err.message || err}`);
     console.error(`  - Check VPN / network access to Azure SQL and the credentials in .env.`);
-    console.error(`  - To use the local SQLite database instead, clear DB_BACKEND:`);
-    console.error(`      PowerShell:  $env:DB_BACKEND = ''      (or just open a new terminal)`);
+    console.error(`  - To use the local SQLite database instead, set DB_BACKEND=sqlite:`);
+    console.error(`      PowerShell:  $env:DB_BACKEND = 'sqlite'`);
   } else {
     console.error(`ERROR: failed to start the API.`);
     console.error(`  ${err.message || err}`);
