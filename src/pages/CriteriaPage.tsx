@@ -62,8 +62,13 @@ function ApplicableCount({ contentType }: { contentType: string }) {
 // ---------------------------------------------------------------------------
 const criteriaTypeLabelMap = Object.fromEntries(CRITERIA_TYPES.map((t) => [t.value, t.label]));
 
-function useFilter(): [Set<string>, (v: string) => void, () => void] {
-  const [s, setS] = useState<Set<string>>(new Set());
+// The "Marketplace" filter keys off the marketplace tag, but treats
+// Universal-context criteria (which have no marketplace tag) as "Universal".
+const marketplaceKey = (c: Criterion): string =>
+  c.marketplace_tag || (c.context === "Universal" ? "Universal" : "");
+
+function useFilter(initial: string[] = []): [Set<string>, (v: string) => void, () => void] {
+  const [s, setS] = useState<Set<string>>(() => new Set(initial));
   const toggle = (v: string) => setS((p) => { const n = new Set(p); if (n.has(v)) n.delete(v); else n.add(v); return n; });
   const clear = () => setS(new Set());
   return [s, toggle, clear];
@@ -236,7 +241,7 @@ const CriteriaPage = () => {
   const [typeFilter,        toggleType,        clearType       ] = useFilter();
   const [contentTypeFilter, toggleContentType, clearContentType] = useFilter();
   const [categoryFilter,    toggleCategory,    clearCategory   ] = useFilter();
-  const [marketplaceFilter, toggleMarketplace, clearMarketplace] = useFilter();
+  const [marketplaceFilter, toggleMarketplace, clearMarketplace] = useFilter(["Universal"]);
   const [brandFilter,       toggleBrand,       clearBrand      ] = useFilter();
   const [industryFilter,    toggleIndustry,    clearIndustry   ] = useFilter();
 
@@ -244,7 +249,7 @@ const CriteriaPage = () => {
     Array.from(new Set(criteria.map((c) => c.criteria_category).filter(Boolean))).sort(),
     [criteria]);
   const marketplaceOptions = useMemo(() =>
-    Array.from(new Set(criteria.map((c) => c.marketplace_tag).filter((v): v is string => !!v))).sort(),
+    Array.from(new Set(criteria.map(marketplaceKey).filter(Boolean))).sort(),
     [criteria]);
   const brandOptions = useMemo(() =>
     Array.from(new Set(criteria.map((c) => c.brand_tag).filter((v): v is string => !!v))).sort(),
@@ -263,7 +268,7 @@ const CriteriaPage = () => {
     if (typeFilter.size        && !typeFilter.has(c.criteria_type))         return false;
     if (contentTypeFilter.size && !contentTypeFilter.has(c.content_type))  return false;
     if (categoryFilter.size    && !categoryFilter.has(c.criteria_category)) return false;
-    if (marketplaceFilter.size && !marketplaceFilter.has(c.marketplace_tag ?? "")) return false;
+    if (marketplaceFilter.size && !marketplaceFilter.has(marketplaceKey(c))) return false;
     if (brandFilter.size       && !brandFilter.has(c.brand_tag ?? ""))     return false;
     if (industryFilter.size    && !industryFilter.has(c.industry_tag ?? "")) return false;
     return true;
