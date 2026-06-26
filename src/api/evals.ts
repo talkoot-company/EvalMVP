@@ -31,6 +31,17 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface RegradeResult {
+  generation_id: string;
+  criterion_id: string;
+  criterion_name: string;
+  desired_score: string;
+  score: string;
+  rationale: string;
+  evidence: string[];
+  product_name: string;
+}
+
 export interface PostEditRequest {
   generation_id: string;
   criterion_name: string;
@@ -56,5 +67,13 @@ export const evalsApi = {
     apiFetch("/post-edit", {
       method: "POST",
       body: JSON.stringify(req),
+    }),
+
+  // Re-grade arbitrary content (e.g. the post-edited copy) against a criterion,
+  // reusing the generation's product data for grounding/hallucination checks.
+  regrade: (generation_id: string, opts: { criterion_id?: string; criterion_name?: string; content: string }): Promise<RegradeResult> =>
+    apiFetch("/eval/regrade", {
+      method: "POST",
+      body: JSON.stringify({ generation_id, ...opts }),
     }),
 };

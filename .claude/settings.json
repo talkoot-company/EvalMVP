@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Claude_Preview__preview_console_logs",
+      "mcp__Claude_Preview__preview_screenshot",
+      "mcp__a5059892-fd01-41f9-a57c-c1d4942bf37b__sharepoint_search",
+      "mcp__a5059892-fd01-41f9-a57c-c1d4942bf37b__read_resource"
+    ]
+  }
+}

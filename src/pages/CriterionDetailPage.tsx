@@ -4,7 +4,7 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { criteriaApi } from "@/api/criteria";
 import { generationsApi, type Generation } from "@/api/generations";
 import { mappingApi } from "@/api/mapping";
-import { evalsApi, type EvalResult } from "@/api/evals";
+import { evalsApi, type EvalResult, type RegradeResult } from "@/api/evals";
 import type { Criterion } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +13,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { ArrowLeft, ChevronLeft, ChevronRight, Play, Loader2, CheckCircle2, XCircle, Pencil, EyeOff, Eye } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Inline editable field
@@ -102,6 +103,7 @@ function saveTestSet(criterionId: string, ids: Set<string>) {
 
 type RunStatus = "pending" | "running" | "done" | "error";
 type PostEditStatus = "idle" | "running" | "done";
+type RegradeStatus = "idle" | "running" | "done" | "error";
 
 interface RunEntry {
   generationId: string;
@@ -110,8 +112,46 @@ interface RunEntry {
   error?: string;
   postEditStatus?: PostEditStatus;
   postEditContent?: string;
+  regradeStatus?: RegradeStatus;
+  regradeResult?: RegradeResult;
+  regradeError?: string;
 }
 
+
+// Generation copy is long; show 2 lines with a click-to-expand toggle that only
+// appears when the content is actually truncated.
+function ExpandableContent({ text, className, textClassName }: {
+  text: string; className?: string; textClassName?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const ref = useRef<HTMLParagraphElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (el && !expanded) setOverflowing(el.scrollHeight > el.clientHeight + 1);
+  }, [text, expanded]);
+
+  return (
+    <div className={className}>
+      <p
+        ref={ref}
+        className={cn("whitespace-pre-wrap", textClassName, !expanded && "line-clamp-2")}
+      >
+        {text}
+      </p>
+      {(overflowing || expanded) && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1 text-[10px] font-medium text-primary hover:underline"
+        >
+          {expanded ? "Show less" : "Show full generation"}
+        </button>
+      )}
+    </div>
+  );
+}
 
 function ScoreBadge({ score, desired }: { score: string; desired: string }) {
   const passed = desired && score === desired;
@@ -132,10 +172,12 @@ function TestRunResults({
   entries,
   generationsById,
   onPostEdit,
+  onRegrade,
 }: {
   entries: RunEntry[];
   generationsById: Map<string, Generation>;
   onPostEdit: (generationId: string) => void;
+  onRegrade: (generationId: string) => void;
 }) {
   const done = entries.filter((e) => e.status === "done").length;
   const total = entries.length;
@@ -190,11 +232,13 @@ function TestRunResults({
                 </div>
               </div>
 
-              {/* Generation preview */}
+              {/* Generation preview (click to expand full content) */}
               {gen?.response_content && (
-                <p className="text-xs text-muted-foreground line-clamp-2 border-l-2 border-muted pl-2">
-                  {gen.response_content}
-                </p>
+                <ExpandableContent
+                  text={gen.response_content}
+                  className="border-l-2 border-muted pl-2"
+                  textClassName="text-xs text-muted-foreground"
+                />
               )}
 
               {/* Result detail */}
@@ -232,11 +276,59 @@ function TestRunResults({
                       </span>
                     )}
                     {entry.postEditStatus === "done" && entry.postEditContent && (
-                      <div className="space-y-1">
+                      <div className="space-y-2">
                         <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Post-edited</p>
                         <p className="text-sm leading-relaxed bg-muted/50 rounded p-2 whitespace-pre-wrap">
                           {entry.postEditContent}
                         </p>
+
+                        {/* Re-grade the post-edited copy against the same criterion */}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {(!entry.regradeStatus || entry.regradeStatus === "idle" || entry.regradeStatus === "error") && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-xs gap-1.5"
+                              onClick={() => onRegrade(entry.generationId)}
+                            >
+                              <Play className="h-3 w-3" /> Re-grade post-edit
+                            </Button>
+                          )}
+                          {entry.regradeStatus === "running" && (
+                            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                              <Loader2 className="h-3 w-3 animate-spin" /> Re-grading…
+                            </span>
+                          )}
+                          {entry.regradeStatus === "done" && entry.regradeResult && (
+                            <>
+                              <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">New score</span>
+                              <ScoreBadge score={entry.regradeResult.score} desired={entry.regradeResult.desired_score} />
+                              {entry.result && (
+                                <span className="text-[11px] text-muted-foreground">
+                                  was {entry.result.score}
+                                </span>
+                              )}
+                            </>
+                          )}
+                          {entry.regradeStatus === "error" && (
+                            <span className="text-xs text-destructive">{entry.regradeError ?? "Re-grade failed"}</span>
+                          )}
+                        </div>
+
+                        {entry.regradeStatus === "done" && entry.regradeResult && (
+                          <div className="space-y-1.5 pl-2 border-l-2 border-muted">
+                            <p className="text-sm leading-relaxed">{entry.regradeResult.rationale}</p>
+                            {entry.regradeResult.evidence.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5">
+                                {entry.regradeResult.evidence.map((e, i) => (
+                                  <span key={i} className="text-xs italic text-muted-foreground bg-muted px-2 py-0.5 rounded">
+                                    &ldquo;{e}&rdquo;
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -360,6 +452,22 @@ function MatchingGenerationsTable({
     [matching],
   );
 
+  // Reconcile the saved test set against the generations that actually match
+  // this criterion now. Stale ids (from a previous dataset or a different
+  // criterion) are dropped so they don't trigger "Generation not found" and the
+  // selected count stays accurate. Guarded on a non-empty match set so we never
+  // wipe selections while generations/mapping are still loading.
+  useEffect(() => {
+    if (matching.length === 0) return;
+    const validIds = new Set(matching.map((g) => g.generation_id));
+    setTestSet((prev) => {
+      const pruned = new Set([...prev].filter((id) => validIds.has(id)));
+      if (pruned.size === prev.size) return prev;
+      saveTestSet(criterionId, pruned);
+      return pruned;
+    });
+  }, [matching, criterionId]);
+
   if (applicableGenTypes.length === 0) {
     return (
       <p className="text-sm text-muted-foreground">
@@ -464,7 +572,9 @@ function MatchingGenerationsTable({
                     {formatDate(g.created_at)}
                   </TableCell>
                   <TableCell className="text-sm max-w-md">
-                    <span className="line-clamp-2">{g.response_content ?? "—"}</span>
+                    {g.response_content
+                      ? <ExpandableContent text={g.response_content} textClassName="text-sm" />
+                      : "—"}
                   </TableCell>
                 </TableRow>
               ))}
@@ -507,6 +617,27 @@ function MatchingGenerationsTable({
                   e.generationId === generationId ? { ...e, postEditStatus: "idle" } : e
                 ) : prev);
                 console.error("Post-edit failed:", err);
+              }
+            }}
+            onRegrade={async (generationId) => {
+              const entry = runEntries.find((e) => e.generationId === generationId);
+              if (!entry?.postEditContent) return;
+              setRunEntries((prev) => prev ? prev.map((e) =>
+                e.generationId === generationId ? { ...e, regradeStatus: "running", regradeError: undefined } : e
+              ) : prev);
+              try {
+                const regradeResult = await evalsApi.regrade(generationId, {
+                  criterion_id: criterionId,
+                  content: entry.postEditContent,
+                });
+                setRunEntries((prev) => prev ? prev.map((e) =>
+                  e.generationId === generationId ? { ...e, regradeStatus: "done", regradeResult } : e
+                ) : prev);
+              } catch (err) {
+                setRunEntries((prev) => prev ? prev.map((e) =>
+                  e.generationId === generationId ? { ...e, regradeStatus: "error", regradeError: String(err) } : e
+                ) : prev);
+                console.error("Re-grade failed:", err);
               }
             }}
           />
@@ -846,6 +977,7 @@ export default function CriterionDetailPage() {
       {/* Matching generations */}
       <Section title="Applicable generations">
         <MatchingGenerationsTable
+          key={criterion.id}
           contentType={criterion.content_type}
           criterionId={criterion.id}
           criterionName={criterion.criteria_name}

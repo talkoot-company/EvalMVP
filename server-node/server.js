@@ -332,6 +332,59 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     });
   }));
 
+  // Re-grade arbitrary copy (e.g. AI post-edited text) against a criterion,
+  // reusing the original generation's request messages so the evaluator still
+  // sees the product data (keywords, approved claims) needed for grounding /
+  // hallucination checks. Not persisted — it's a what-if vs the stored eval.
+  app.post("/api/eval/regrade", route(async (req, res) => {
+    const body = req.body || {};
+    const content = typeof body.content === "string" ? body.content : "";
+    if (!content.trim()) throw new HttpError(422, "content is required");
+    const criterionId = body.criterion_id !== null && body.criterion_id !== undefined ? String(body.criterion_id) : null;
+    const criterionName = body.criterion_name || null;
+    if (!criterionId && !criterionName) {
+      throw new HttpError(422, "Either criterion_id or criterion_name is required");
+    }
+
+    const genRow = await store.getGeneration(body.generation_id);
+    if (!genRow) throw new HttpError(404, "Generation not found");
+
+    // Reconstruct the original request chain so product data flows into the eval.
+    let reqData = {};
+    try {
+      reqData = typeof genRow.req_json === "string" ? JSON.parse(genRow.req_json) : (genRow.req_json || {});
+    } catch {
+      reqData = {};
+    }
+    const requestMessages = reqData.messages || [];
+
+    const critRow = criterionId
+      ? await store.getCriterion(criterionId)
+      : await store.findCriterionByName(criterionName);
+    if (!critRow) {
+      throw new HttpError(404, `Criterion not found: id=${JSON.stringify(criterionId)}, name=${JSON.stringify(criterionName)}`);
+    }
+    const criterion = rowToCriterion(critRow);
+
+    let result;
+    try {
+      result = await runSingleEval(content, requestMessages, criterion);
+    } catch (err) {
+      throw new HttpError(500, `Re-grade failed: ${err.message || err}`);
+    }
+
+    res.json({
+      generation_id: body.generation_id,
+      criterion_id: result.criterion_id,
+      criterion_name: result.criterion_name,
+      desired_score: result.desired_score ?? "",
+      score: result.score,
+      rationale: result.rationale,
+      evidence: result.evidence,
+      product_name: result.product_name ?? "",
+    });
+  }));
+
   app.get("/api/eval/results/:generationId", route(async (req, res) => {
     const rows = await store.getEvalResults(req.params.generationId);
     res.json(rows.map((r) => {
