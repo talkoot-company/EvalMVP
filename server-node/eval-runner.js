@@ -175,6 +175,15 @@ Return ONLY a JSON object with these exact fields:
 Example: {"score": 3, "rationale": "The copy speaks directly to the reader.", "evidence": ["Fuel your moments", "feel good about your choice"]}`;
 }
 
+// The exact chat chain sent to the LLM to grade `copyText` (product data from
+// requestMessages is embedded in the prompt). Used by the eval and to preview
+// the chain without calling the model.
+export function buildEvalMessages(copyText, requestMessages, criterion) {
+  const productData = extractProductData(requestMessages);
+  const prompt = buildEvalPrompt(criterion, copyText, productData);
+  return [{ role: "user", content: prompt }];
+}
+
 // ---------------------------------------------------------------------------
 // Main eval entry point
 // ---------------------------------------------------------------------------
@@ -184,8 +193,8 @@ export async function runSingleEval(copyText, requestMessages, criterion) {
   const criteriaType = criterion.criteria_type || "numerical-scale";
   const evalDefinition = criterion.eval_definition || {};
 
-  const prompt = buildEvalPrompt(criterion, copyText, productData);
-  const result = await callLlm([{ role: "user", content: prompt }]);
+  const messages = buildEvalMessages(copyText, requestMessages, criterion);
+  const result = await callLlm(messages);
 
   let score = "", rationale = "", evidence = [];
   if (result && typeof result === "object") {

@@ -112,6 +112,23 @@ export async function createMssqlStore({ adonet, database, prefix }) {
   };
   const one = async (text, params = []) => (await q(text, params))[0] || null;
 
+  // Self-provision the refinement_chains table — it isn't created by
+  // db/setup_temp_tables.py, so create it on connect if absent.
+  await q(
+    `IF OBJECT_ID(N'[dbo].[${prefix}refinement_chains]', N'U') IS NULL
+     CREATE TABLE [dbo].[${prefix}refinement_chains] (
+       id             NVARCHAR(300) NOT NULL PRIMARY KEY,
+       generation_id  NVARCHAR(64)  NOT NULL,
+       criterion_id   NVARCHAR(200) NOT NULL,
+       criterion_name NVARCHAR(500) NULL,
+       data           NVARCHAR(MAX) NOT NULL,
+       created_at     DATETIME2(7)  NOT NULL,
+       updated_at     DATETIME2(7)  NOT NULL
+     );`
+  );
+
+  const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}`;
+
   const insertRow = async (base, obj) => {
     const o = coerceWrite(base, obj);
     const cols = Object.keys(o);
@@ -193,6 +210,31 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     insertEvalResult: (obj) => insertRow("eval_results", obj),
     getEvalResults: (genId) =>
       q(`SELECT * FROM ${tbl("eval_results")} WHERE generation_id=@p0 ORDER BY run_at DESC`, [genId]),
+
+    // refinement chains (saved post-edit / re-grade history per generation+criterion)
+    getChain: async (criterionId, generationId) => {
+      const row = await one(`SELECT * FROM ${tbl("refinement_chains")} WHERE id=@p0`, [chainKey(criterionId, generationId)]);
+      if (!row) return null;
+      return { ...row, data: typeof row.data === "string" ? JSON.parse(row.data) : row.data };
+    },
+    saveChain: async (criterionId, generationId, criterionName, data) => {
+      const id = chainKey(criterionId, generationId);
+      const now = new Date();
+      const existing = await one(`SELECT created_at FROM ${tbl("refinement_chains")} WHERE id=@p0`, [id]);
+      const createdAt = existing ? existing.created_at : now;
+      await q(`DELETE FROM ${tbl("refinement_chains")} WHERE id=@p0`, [id]);
+      await q(
+        `INSERT INTO ${tbl("refinement_chains")}
+           (id, generation_id, criterion_id, criterion_name, data, created_at, updated_at)
+         VALUES (@p0,@p1,@p2,@p3,@p4,@p5,@p6)`,
+        [id, generationId, criterionId, criterionName ?? null, JSON.stringify(data), createdAt, now]
+      );
+    },
+    deleteChain: (criterionId, generationId) =>
+      q(`DELETE FROM ${tbl("refinement_chains")} WHERE id=@p0`, [chainKey(criterionId, generationId)]),
+    listChainGenerationIds: async (criterionId) =>
+      (await q(`SELECT generation_id FROM ${tbl("refinement_chains")} WHERE criterion_id=@p0`, [criterionId]))
+        .map((r) => r.generation_id),
 
     // generic (export only; import is gated to sqlite at the route)
     allRows: (base) => q(`SELECT * FROM ${tbl(base)}`),

@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-import { runSingleEval, aiClient, llmModel } from "./eval-runner.js";
+import { runSingleEval, buildEvalMessages, aiClient, llmModel } from "./eval-runner.js";
 import { exportZipBuffer, importZipBuffer, KINDS } from "./data-transfer.js";
 
 // ---------------------------------------------------------------------------
@@ -100,6 +100,37 @@ function buildMapping(rows) {
     if (r.criteria_content_type in result) result[r.criteria_content_type].push(r.generation_type);
   }
   return result;
+}
+
+// The exact prompt sent to the LLM to rewrite (post-edit) a piece of copy.
+function buildPostEditPrompt({ systemPrompt, userMessage, originalContent, criterion_name, score, desired_score, rationale, evidence }) {
+  let evidenceBlock = "";
+  if (Array.isArray(evidence) && evidence.length) {
+    evidenceBlock = "\nSpecific passages flagged:\n" +
+      evidence.filter(Boolean).map((e) => `  - "${e}"`).join("\n");
+  }
+  return `You are an expert product copy editor. Your task is to improve a piece of product copy based on evaluation feedback.
+
+--- ORIGINAL TASK ---
+${systemPrompt}
+
+--- PRODUCT DATA ---
+${userMessage}
+
+--- ORIGINAL COPY ---
+${originalContent}
+
+--- EVALUATION FEEDBACK ---
+Criterion: ${criterion_name}
+Score: ${score} (target: ${desired_score})
+Feedback: ${rationale}${evidenceBlock}
+
+--- INSTRUCTIONS ---
+Rewrite the copy to address the evaluation feedback and achieve the target score.
+- Keep the same format and approximate length as the original.
+- Only change what is needed to address the specific feedback.
+- Do not add commentary or explanations — output only the improved copy.
+`;
 }
 
 export function createApp({ store, resultsDir, staticDir = null }) {
@@ -398,6 +429,37 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     }));
   }));
 
+  // ----- Refinement chains (saved post-edit / re-grade history) -----
+
+  app.get("/api/eval/chain", route(async (req, res) => {
+    const { criterion_id, generation_id } = req.query;
+    if (!criterion_id || !generation_id) throw new HttpError(422, "criterion_id and generation_id are required");
+    res.json(await store.getChain(String(criterion_id), String(generation_id))); // null when none saved
+  }));
+
+  app.put("/api/eval/chain", route(async (req, res) => {
+    const body = req.body || {};
+    if (!body.criterion_id || !body.generation_id || !body.data) {
+      throw new HttpError(422, "criterion_id, generation_id and data are required");
+    }
+    await store.saveChain(String(body.criterion_id), String(body.generation_id), body.criterion_name ?? null, body.data);
+    res.json(await store.getChain(String(body.criterion_id), String(body.generation_id)));
+  }));
+
+  app.delete("/api/eval/chain", route(async (req, res) => {
+    const { criterion_id, generation_id } = req.query;
+    if (!criterion_id || !generation_id) throw new HttpError(422, "criterion_id and generation_id are required");
+    await store.deleteChain(String(criterion_id), String(generation_id));
+    res.status(204).end();
+  }));
+
+  // Which generations have a saved chain for a criterion (for the list indicator).
+  app.get("/api/eval/chains", route(async (req, res) => {
+    const { criterion_id } = req.query;
+    if (!criterion_id) throw new HttpError(422, "criterion_id is required");
+    res.json(await store.listChainGenerationIds(String(criterion_id)));
+  }));
+
   // ----- Post-edit route -----
 
   app.post("/api/post-edit", route(async (req, res) => {
@@ -407,37 +469,24 @@ export function createApp({ store, resultsDir, staticDir = null }) {
 
     const systemPrompt = genRow.system_prompt || "";
     const userMessage = genRow.last_user_message || "";
-    const originalContent = genRow.response_content || "";
+    // The copy to improve: the supplied content (e.g. a prior post-edit, for
+    // iterative refinement) or the generation's original output. The system
+    // prompt + product data above always come from the generation so each
+    // round stays grounded.
+    const originalContent = (typeof body.content === "string" && body.content.trim())
+      ? body.content
+      : (genRow.response_content || "");
 
-    let evidenceBlock = "";
-    if (Array.isArray(body.evidence) && body.evidence.length) {
-      evidenceBlock =
-        "\nSpecific passages flagged:\n" +
-        body.evidence.filter(Boolean).map((e) => `  - "${e}"`).join("\n");
-    }
-
-    const postEditPrompt = `You are an expert product copy editor. Your task is to improve a piece of product copy based on evaluation feedback.
-
---- ORIGINAL TASK ---
-${systemPrompt}
-
---- PRODUCT DATA ---
-${userMessage}
-
---- ORIGINAL COPY ---
-${originalContent}
-
---- EVALUATION FEEDBACK ---
-Criterion: ${body.criterion_name}
-Score: ${body.score} (target: ${body.desired_score})
-Feedback: ${body.rationale}${evidenceBlock}
-
---- INSTRUCTIONS ---
-Rewrite the copy to address the evaluation feedback and achieve the target score.
-- Keep the same format and approximate length as the original.
-- Only change what is needed to address the specific feedback.
-- Do not add commentary or explanations — output only the improved copy.
-`;
+    const postEditPrompt = buildPostEditPrompt({
+      systemPrompt,
+      userMessage,
+      originalContent,
+      criterion_name: body.criterion_name,
+      score: body.score,
+      desired_score: body.desired_score,
+      rationale: body.rationale,
+      evidence: body.evidence,
+    });
 
     let improved;
     try {
@@ -451,6 +500,65 @@ Rewrite the copy to address the evaluation feedback and achieve the target score
     }
 
     res.json({ improved_content: improved.trim() });
+  }));
+
+  // Reconstruct (without calling the LLM) the exact chat chain that was/would be
+  // sent for an eval or a post-edit, so the UI can show it in a "view chat" modal.
+  app.post("/api/eval/messages", route(async (req, res) => {
+    const body = req.body || {};
+    const mode = body.mode === "postedit" ? "postedit" : "eval";
+
+    const genRow = await store.getGeneration(body.generation_id);
+    if (!genRow) throw new HttpError(404, "Generation not found");
+
+    if (mode === "postedit") {
+      const systemPrompt = genRow.system_prompt || "";
+      const userMessage = genRow.last_user_message || "";
+      const originalContent = (typeof body.content === "string" && body.content.trim())
+        ? body.content
+        : (genRow.response_content || "");
+      const prompt = buildPostEditPrompt({
+        systemPrompt,
+        userMessage,
+        originalContent,
+        criterion_name: body.criterion_name,
+        score: body.score,
+        desired_score: body.desired_score,
+        rationale: body.rationale,
+        evidence: body.evidence,
+      });
+      res.json({ mode, messages: [{ role: "user", content: prompt }] });
+      return;
+    }
+
+    // mode === "eval"
+    const criterionId = body.criterion_id !== null && body.criterion_id !== undefined ? String(body.criterion_id) : null;
+    const criterionName = body.criterion_name || null;
+    if (!criterionId && !criterionName) {
+      throw new HttpError(422, "Either criterion_id or criterion_name is required");
+    }
+
+    let reqData = {};
+    try {
+      reqData = typeof genRow.req_json === "string" ? JSON.parse(genRow.req_json) : (genRow.req_json || {});
+    } catch {
+      reqData = {};
+    }
+    const requestMessages = reqData.messages || [];
+
+    const critRow = criterionId
+      ? await store.getCriterion(criterionId)
+      : await store.findCriterionByName(criterionName);
+    if (!critRow) {
+      throw new HttpError(404, `Criterion not found: id=${JSON.stringify(criterionId)}, name=${JSON.stringify(criterionName)}`);
+    }
+    const criterion = rowToCriterion(critRow);
+
+    const content = (typeof body.content === "string" && body.content.trim())
+      ? body.content
+      : (genRow.response_content || "");
+
+    res.json({ mode, messages: buildEvalMessages(content, requestMessages, criterion) });
   }));
 
   // ----- Data import/export -----

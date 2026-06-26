@@ -4,15 +4,19 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { criteriaApi } from "@/api/criteria";
 import { generationsApi, type Generation } from "@/api/generations";
 import { mappingApi } from "@/api/mapping";
-import { evalsApi, type EvalResult, type RegradeResult } from "@/api/evals";
+import { evalsApi, type EvalResult, type RegradeResult, type RefinementChainData, type ChatMessage, type ChatMessagesRequest } from "@/api/evals";
 import type { Criterion } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { ArrowLeft, ChevronLeft, ChevronRight, Play, Loader2, CheckCircle2, XCircle, Pencil, EyeOff, Eye } from "lucide-react";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+} from "@/components/ui/dialog";
+import { ArrowLeft, ChevronLeft, ChevronRight, Play, Loader2, CheckCircle2, XCircle, Pencil, EyeOff, Eye, Trash2, History, MessageSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -102,19 +106,55 @@ function saveTestSet(criterionId: string, ids: Set<string>) {
 // ---------------------------------------------------------------------------
 
 type RunStatus = "pending" | "running" | "done" | "error";
-type PostEditStatus = "idle" | "running" | "done";
-type RegradeStatus = "idle" | "running" | "done" | "error";
+type StepStatus = "idle" | "running" | "done" | "error";
+
+// One round of the refine loop: an AI post-edit and its (optional) re-grade.
+interface PostEditIteration {
+  content: string;
+  comments: string;            // the (possibly user-edited) feedback that generated this round
+  regradeStatus: StepStatus;
+  regradeResult?: RegradeResult;
+  regradeError?: string;
+}
 
 interface RunEntry {
   generationId: string;
   status: RunStatus;
   result?: EvalResult;
   error?: string;
-  postEditStatus?: PostEditStatus;
-  postEditContent?: string;
-  regradeStatus?: RegradeStatus;
-  regradeResult?: RegradeResult;
-  regradeError?: string;
+  postEditStatus?: StepStatus; // status of an in-flight (new) post-edit
+  postEditError?: string;
+  iterations?: PostEditIteration[];
+  pendingComments?: string;    // editable feedback that will drive the NEXT post-edit
+  restoredFromChain?: boolean; // result came from a saved chain, not a fresh eval run
+}
+
+// Serialize an entry's original eval + iterations into the persisted chain shape.
+function buildChainData(entry: RunEntry, iterations: PostEditIteration[]): RefinementChainData {
+  return {
+    original: entry.result
+      ? {
+          score: entry.result.score,
+          desired_score: entry.result.desired_score,
+          rationale: entry.result.rationale,
+          evidence: entry.result.evidence,
+          criterion_name: entry.result.criterion_name,
+          product_name: entry.result.product_name,
+        }
+      : undefined,
+    iterations: iterations.map((it) => ({
+      content: it.content,
+      comments: it.comments ?? "",
+      regrade: it.regradeResult
+        ? {
+            score: it.regradeResult.score,
+            desired_score: it.regradeResult.desired_score,
+            rationale: it.regradeResult.rationale,
+            evidence: it.regradeResult.evidence,
+          }
+        : undefined,
+    })),
+  };
 }
 
 
@@ -168,16 +208,105 @@ function ScoreBadge({ score, desired }: { score: string; desired: string }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// "View chat" modal — reconstructs and shows the exact chat chain (no LLM call)
+// ---------------------------------------------------------------------------
+function ChatChainModal({
+  open,
+  onOpenChange,
+  request,
+  title,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  request: ChatMessagesRequest | null;
+  title: string;
+}) {
+  const [messages, setMessages] = useState<ChatMessage[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [raw, setRaw] = useState(false);
+
+  useEffect(() => {
+    if (!open || !request) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setMessages(null);
+    evalsApi
+      .messages(request)
+      .then((r) => { if (!cancelled) setMessages(r.messages); })
+      .catch((e) => { if (!cancelled) setError(String(e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [open, request]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col gap-3">
+        <DialogHeader>
+          <DialogTitle className="text-base">{title}</DialogTitle>
+          <DialogDescription>
+            The exact chat chain sent to the model — {messages?.length ?? 0} message{messages?.length === 1 ? "" : "s"}.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex items-center justify-end -mt-1">
+          <Button
+            size="sm" variant="ghost" className="h-6 text-[11px]"
+            onClick={() => setRaw((v) => !v)}
+            disabled={!messages}
+          >
+            {raw ? "Readable view" : "Raw JSON"}
+          </Button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 space-y-3 pr-1">
+          {loading && (
+            <p className="text-sm text-muted-foreground flex items-center gap-1.5">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Building chat…
+            </p>
+          )}
+          {error && <p className="text-sm text-destructive whitespace-pre-wrap">{error}</p>}
+
+          {messages && !raw && messages.map((m, i) => (
+            <div key={i} className="space-y-1">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                {m.role}
+              </p>
+              <pre className="whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 text-xs leading-relaxed font-sans">
+                {m.content}
+              </pre>
+            </div>
+          ))}
+
+          {messages && raw && (
+            <pre className="whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 text-xs leading-relaxed">
+              {JSON.stringify(messages, null, 2)}
+            </pre>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function TestRunResults({
   entries,
   generationsById,
   onPostEdit,
   onRegrade,
+  onClear,
+  onCommentsChange,
+  onViewChat,
 }: {
   entries: RunEntry[];
   generationsById: Map<string, Generation>;
   onPostEdit: (generationId: string) => void;
-  onRegrade: (generationId: string) => void;
+  onRegrade: (generationId: string, index: number) => void;
+  onClear: (generationId: string) => void;
+  onCommentsChange: (generationId: string, value: string) => void;
+  onViewChat: (request: ChatMessagesRequest, title: string) => void;
 }) {
   const done = entries.filter((e) => e.status === "done").length;
   const total = entries.length;
@@ -200,6 +329,17 @@ function TestRunResults({
         {entries.map((entry) => {
           const gen = generationsById.get(entry.generationId);
           const shortId = entry.generationId.slice(0, 8);
+          const iterations = entry.iterations ?? [];
+          const lastIter = iterations[iterations.length - 1];
+          // First round edits the original output; each later round needs the
+          // previous round's re-grade as the feedback that drives it.
+          const canPostEdit =
+            entry.status === "done" && !!entry.result &&
+            (iterations.length === 0 || lastIter?.regradeStatus === "done");
+          // Feedback that drives the next post-edit: latest re-grade, else the
+          // original eval. Pre-fills the editable instructions box.
+          const driverGrade = lastIter?.regradeResult ?? entry.result;
+          const commentsValue = entry.pendingComments ?? driverGrade?.rationale ?? "";
 
           return (
             <div
@@ -258,78 +398,164 @@ function TestRunResults({
                     </div>
                   )}
 
-                  {/* Post-edit */}
-                  <div className="pt-1 border-t border-dashed">
-                    {(!entry.postEditStatus || entry.postEditStatus === "idle") && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 text-xs gap-1.5"
-                        onClick={() => onPostEdit(entry.generationId)}
-                      >
-                        <Pencil className="h-3 w-3" /> Post-edit with AI
-                      </Button>
+                  <Button
+                    size="sm" variant="ghost"
+                    className="h-6 text-[11px] gap-1 text-muted-foreground hover:text-foreground"
+                    onClick={() => onViewChat(
+                      { generation_id: entry.generationId, mode: "eval", criterion_id: entry.result!.criterion_id },
+                      `Eval chat · ${shortId}…`,
                     )}
+                  >
+                    <MessageSquare className="h-3 w-3" /> View eval chat
+                  </Button>
+
+                  {/* Iterative post-edit → re-grade loop */}
+                  <div className="pt-1 border-t border-dashed space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Refinements</p>
+                      {iterations.length > 0 && (
+                        <Button
+                          size="sm" variant="ghost"
+                          className="h-6 text-[11px] gap-1.5 text-muted-foreground hover:text-destructive"
+                          onClick={() => onClear(entry.generationId)}
+                        >
+                          <Trash2 className="h-3 w-3" /> Clear &amp; start over
+                        </Button>
+                      )}
+                    </div>
+
+                    {iterations.map((iter, i) => {
+                      const prevScore = i === 0
+                        ? entry.result?.score
+                        : iterations[i - 1]?.regradeResult?.score;
+                      // The grade that drove this rewrite (original eval for the
+                      // first round, else the previous round's re-grade) and the
+                      // copy it started from — used to reconstruct the rewrite chat.
+                      const driver = i === 0 ? entry.result : iterations[i - 1]?.regradeResult;
+                      const baseContent = i === 0 ? undefined : iterations[i - 1]?.content;
+                      return (
+                        <div key={i} className="space-y-1.5">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                              Post-edit #{i + 1}
+                            </p>
+                            {iter.regradeStatus === "running" ? (
+                              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                <Loader2 className="h-3 w-3 animate-spin" /> Re-grading…
+                              </span>
+                            ) : (
+                              <Button
+                                size="sm" variant="outline" className="h-6 text-[11px] gap-1.5"
+                                onClick={() => onRegrade(entry.generationId, i)}
+                              >
+                                <Play className="h-3 w-3" /> {iter.regradeStatus === "done" ? "Re-grade again" : "Re-grade"}
+                              </Button>
+                            )}
+                            {iter.regradeStatus === "done" && iter.regradeResult && (
+                              <>
+                                <ScoreBadge score={iter.regradeResult.score} desired={iter.regradeResult.desired_score} />
+                                {prevScore != null && (
+                                  <span className="text-[11px] text-muted-foreground">was {prevScore}</span>
+                                )}
+                              </>
+                            )}
+                            {iter.regradeStatus === "error" && (
+                              <span className="text-xs text-destructive">{iter.regradeError ?? "Re-grade failed"}</span>
+                            )}
+                          </div>
+                          {iter.comments && (
+                            <p className="text-[11px] text-muted-foreground italic">Instructions: {iter.comments}</p>
+                          )}
+                          <p className="text-sm leading-relaxed bg-muted/50 rounded p-2 whitespace-pre-wrap">
+                            {iter.content}
+                          </p>
+                          <div className="flex flex-wrap gap-1">
+                            <Button
+                              size="sm" variant="ghost"
+                              className="h-6 text-[11px] gap-1 text-muted-foreground hover:text-foreground"
+                              onClick={() => onViewChat(
+                                {
+                                  generation_id: entry.generationId,
+                                  mode: "postedit",
+                                  criterion_name: driver?.criterion_name,
+                                  score: driver?.score,
+                                  desired_score: driver?.desired_score,
+                                  rationale: iter.comments,
+                                  evidence: driver?.evidence,
+                                  content: baseContent,
+                                },
+                                `Rewrite chat · post-edit #${i + 1}`,
+                              )}
+                            >
+                              <MessageSquare className="h-3 w-3" /> View rewrite chat
+                            </Button>
+                            {iter.regradeStatus === "done" && iter.regradeResult && (
+                              <Button
+                                size="sm" variant="ghost"
+                                className="h-6 text-[11px] gap-1 text-muted-foreground hover:text-foreground"
+                                onClick={() => onViewChat(
+                                  {
+                                    generation_id: entry.generationId,
+                                    mode: "eval",
+                                    criterion_id: iter.regradeResult!.criterion_id,
+                                    content: iter.content,
+                                  },
+                                  `Re-grade chat · post-edit #${i + 1}`,
+                                )}
+                              >
+                                <MessageSquare className="h-3 w-3" /> View re-grade chat
+                              </Button>
+                            )}
+                          </div>
+                          {iter.regradeStatus === "done" && iter.regradeResult && (
+                            <div className="space-y-1.5 pl-2 border-l-2 border-muted">
+                              <p className="text-sm leading-relaxed">{iter.regradeResult.rationale}</p>
+                              {iter.regradeResult.evidence.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5">
+                                  {iter.regradeResult.evidence.map((e, j) => (
+                                    <span key={j} className="text-xs italic text-muted-foreground bg-muted px-2 py-0.5 rounded">
+                                      &ldquo;{e}&rdquo;
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+
                     {entry.postEditStatus === "running" && (
                       <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                         <Loader2 className="h-3 w-3 animate-spin" /> Generating post-edit…
                       </span>
                     )}
-                    {entry.postEditStatus === "done" && entry.postEditContent && (
-                      <div className="space-y-2">
-                        <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Post-edited</p>
-                        <p className="text-sm leading-relaxed bg-muted/50 rounded p-2 whitespace-pre-wrap">
-                          {entry.postEditContent}
+                    {entry.postEditStatus !== "running" && canPostEdit && (
+                      <div className="space-y-1.5">
+                        <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                          Refinement instructions {iterations.length === 0 ? "(from this eval — edit to steer)" : "(from latest re-grade — edit to steer)"}
                         </p>
-
-                        {/* Re-grade the post-edited copy against the same criterion */}
-                        <div className="flex items-center gap-2 flex-wrap">
-                          {(!entry.regradeStatus || entry.regradeStatus === "idle" || entry.regradeStatus === "error") && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-7 text-xs gap-1.5"
-                              onClick={() => onRegrade(entry.generationId)}
-                            >
-                              <Play className="h-3 w-3" /> Re-grade post-edit
-                            </Button>
-                          )}
-                          {entry.regradeStatus === "running" && (
-                            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                              <Loader2 className="h-3 w-3 animate-spin" /> Re-grading…
-                            </span>
-                          )}
-                          {entry.regradeStatus === "done" && entry.regradeResult && (
-                            <>
-                              <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">New score</span>
-                              <ScoreBadge score={entry.regradeResult.score} desired={entry.regradeResult.desired_score} />
-                              {entry.result && (
-                                <span className="text-[11px] text-muted-foreground">
-                                  was {entry.result.score}
-                                </span>
-                              )}
-                            </>
-                          )}
-                          {entry.regradeStatus === "error" && (
-                            <span className="text-xs text-destructive">{entry.regradeError ?? "Re-grade failed"}</span>
-                          )}
-                        </div>
-
-                        {entry.regradeStatus === "done" && entry.regradeResult && (
-                          <div className="space-y-1.5 pl-2 border-l-2 border-muted">
-                            <p className="text-sm leading-relaxed">{entry.regradeResult.rationale}</p>
-                            {entry.regradeResult.evidence.length > 0 && (
-                              <div className="flex flex-wrap gap-1.5">
-                                {entry.regradeResult.evidence.map((e, i) => (
-                                  <span key={i} className="text-xs italic text-muted-foreground bg-muted px-2 py-0.5 rounded">
-                                    &ldquo;{e}&rdquo;
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        )}
+                        <Textarea
+                          value={commentsValue}
+                          onChange={(e) => onCommentsChange(entry.generationId, e.target.value)}
+                          rows={2}
+                          className="text-xs"
+                          placeholder="What should the rewrite fix?"
+                        />
+                        <Button
+                          size="sm" variant="outline" className="h-7 text-xs gap-1.5"
+                          onClick={() => onPostEdit(entry.generationId)}
+                        >
+                          <Pencil className="h-3 w-3" />
+                          {iterations.length === 0 ? "Post-edit with AI" : "Post-edit again"}
+                        </Button>
                       </div>
+                    )}
+                    {entry.postEditStatus !== "running" && !canPostEdit && iterations.length > 0 && (
+                      <p className="text-[11px] text-muted-foreground">Re-grade the latest post-edit to refine it again.</p>
+                    )}
+                    {entry.postEditStatus === "error" && (
+                      <span className="text-xs text-destructive">{entry.postEditError ?? "Post-edit failed"}</span>
                     )}
                   </div>
                 </div>
@@ -381,6 +607,7 @@ function MatchingGenerationsTable({
   const [testSet, setTestSet] = useState<Set<string>>(() => loadTestSet(criterionId));
   const [runEntries, setRunEntries] = useState<RunEntry[] | null>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [viewChat, setViewChat] = useState<{ request: ChatMessagesRequest; title: string } | null>(null);
 
   function toggleTestSet(generationId: string) {
     setTestSet((prev) => {
@@ -409,6 +636,42 @@ function MatchingGenerationsTable({
       ids.map(async (generationId) => {
         update(generationId, { status: "running" });
         try {
+          // If a saved refinement chain exists, just pull up the history — no
+          // re-running the eval (the original score is restored from the chain).
+          const chain = await evalsApi.chain.get(criterionId, generationId).catch(() => null);
+          const mapIter = (it: RefinementChainData["iterations"][number], critName: string): PostEditIteration => ({
+            content: it.content,
+            comments: it.comments ?? "",
+            regradeStatus: (it.regrade ? "done" : "idle") as StepStatus,
+            regradeResult: it.regrade
+              ? {
+                  generation_id: generationId, criterion_id: criterionId,
+                  criterion_name: critName, product_name: "",
+                  score: it.regrade.score, desired_score: it.regrade.desired_score,
+                  rationale: it.regrade.rationale, evidence: it.regrade.evidence,
+                }
+              : undefined,
+          });
+
+          if (chain?.data?.original) {
+            const o = chain.data.original;
+            const critName = o.criterion_name ?? criterionName;
+            const result: EvalResult = {
+              result_id: "", generation_id: generationId, criterion_id: criterionId,
+              criterion_name: critName, product_name: o.product_name ?? "",
+              score: o.score, desired_score: o.desired_score, rationale: o.rationale,
+              evidence: o.evidence, run_at: chain.updated_at, html_report: null,
+            };
+            update(generationId, {
+              status: "done",
+              result,
+              iterations: (chain.data.iterations ?? []).map((it) => mapIter(it, critName)),
+              restoredFromChain: true,
+            });
+            return;
+          }
+
+          // No saved chain → run the eval.
           const result = await evalsApi.run(generationId, { criterion_id: criterionId });
           update(generationId, { status: "done", result });
         } catch (err) {
@@ -418,7 +681,7 @@ function MatchingGenerationsTable({
     );
 
     setIsRunning(false);
-  }, [isRunning, testSet, criterionId]);
+  }, [isRunning, testSet, criterionId, criterionName]);
 
   const { data: mapping = {} } = useQuery({
     queryKey: ["type_mapping"],
@@ -431,6 +694,19 @@ function MatchingGenerationsTable({
     queryFn: () => generationsApi.list({ limit: 200 }),
     staleTime: 1000 * 60 * 5,
   });
+
+  // Which generations already have a saved refinement chain (for the list badge).
+  const queryClient = useQueryClient();
+  const { data: chainGenIds = [] } = useQuery({
+    queryKey: ["chains", criterionId],
+    queryFn: () => evalsApi.chain.generationIds(criterionId),
+    staleTime: 1000 * 30,
+  });
+  const chainIdSet = useMemo(() => new Set(chainGenIds), [chainGenIds]);
+  const refreshChainIds = useCallback(
+    () => queryClient.invalidateQueries({ queryKey: ["chains", criterionId] }),
+    [queryClient, criterionId],
+  );
 
   const applicableGenTypes = useMemo(
     () => mapping[contentType] ?? [],
@@ -563,7 +839,17 @@ function MatchingGenerationsTable({
                     />
                   </TableCell>
                   <TableCell className="font-mono text-xs text-muted-foreground">
-                    {g.generation_id.slice(0, 8)}…
+                    <div className="flex items-center gap-1.5">
+                      {g.generation_id.slice(0, 8)}…
+                      {chainIdSet.has(g.generation_id) && (
+                        <span
+                          title="Has a saved refinement chain"
+                          className="inline-flex items-center gap-0.5 rounded border border-blue-200 bg-blue-50 px-1 py-0.5 text-[9px] font-medium text-blue-700"
+                        >
+                          <History className="h-2.5 w-2.5" /> refined
+                        </span>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell className="font-mono text-xs text-muted-foreground">
                     {g.model ?? "—"}
@@ -594,55 +880,105 @@ function MatchingGenerationsTable({
           <TestRunResults
             entries={runEntries}
             generationsById={generationsById}
+            onViewChat={(request, title) => setViewChat({ request, title })}
+            onCommentsChange={(generationId, value) => {
+              setRunEntries((prev) => prev ? prev.map((e) =>
+                e.generationId === generationId ? { ...e, pendingComments: value } : e
+              ) : prev);
+            }}
+            onClear={async (generationId) => {
+              setRunEntries((prev) => prev ? prev.map((e) =>
+                e.generationId === generationId
+                  ? { ...e, iterations: [], pendingComments: undefined, postEditStatus: undefined, postEditError: undefined }
+                  : e
+              ) : prev);
+              try {
+                await evalsApi.chain.remove(criterionId, generationId);
+              } catch (err) {
+                console.error("Clear chain failed:", err);
+              }
+              refreshChainIds();
+            }}
             onPostEdit={async (generationId) => {
               const entry = runEntries.find((e) => e.generationId === generationId);
               if (!entry?.result) return;
+              const iters = entry.iterations ?? [];
+              const last = iters[iters.length - 1];
+              // First round: improve the original output using the original eval.
+              // Later rounds: improve the latest post-edit using its re-grade.
+              const baseContent = last ? last.content : undefined;
+              const driver = last ? last.regradeResult : entry.result; // score/target/evidence source
+              if (!driver) return; // need a grade to refine from
+              // The (possibly user-edited) instructions drive the rewrite.
+              const comments = (entry.pendingComments ?? driver.rationale) || "";
               setRunEntries((prev) => prev ? prev.map((e) =>
-                e.generationId === generationId ? { ...e, postEditStatus: "running" } : e
+                e.generationId === generationId ? { ...e, postEditStatus: "running", postEditError: undefined } : e
               ) : prev);
               try {
                 const { improved_content } = await evalsApi.postEdit({
                   generation_id: generationId,
-                  criterion_name: entry.result.criterion_name,
-                  score: entry.result.score,
-                  desired_score: entry.result.desired_score,
-                  rationale: entry.result.rationale,
-                  evidence: entry.result.evidence,
+                  criterion_name: driver.criterion_name,
+                  score: driver.score,
+                  desired_score: driver.desired_score,
+                  rationale: comments,
+                  evidence: driver.evidence,
+                  content: baseContent,
                 });
+                const newIterations: PostEditIteration[] =
+                  [...iters, { content: improved_content, comments, regradeStatus: "idle" }];
                 setRunEntries((prev) => prev ? prev.map((e) =>
-                  e.generationId === generationId ? { ...e, postEditStatus: "done", postEditContent: improved_content } : e
+                  e.generationId === generationId
+                    ? { ...e, postEditStatus: "done", iterations: newIterations, pendingComments: undefined }
+                    : e
                 ) : prev);
+                evalsApi.chain.save({
+                  criterion_id: criterionId, generation_id: generationId, criterion_name: criterionName,
+                  data: buildChainData(entry, newIterations),
+                }).then(refreshChainIds).catch((err) => console.error("Save chain failed:", err));
               } catch (err) {
                 setRunEntries((prev) => prev ? prev.map((e) =>
-                  e.generationId === generationId ? { ...e, postEditStatus: "idle" } : e
+                  e.generationId === generationId ? { ...e, postEditStatus: "error", postEditError: String(err) } : e
                 ) : prev);
                 console.error("Post-edit failed:", err);
               }
             }}
-            onRegrade={async (generationId) => {
+            onRegrade={async (generationId, index) => {
               const entry = runEntries.find((e) => e.generationId === generationId);
-              if (!entry?.postEditContent) return;
-              setRunEntries((prev) => prev ? prev.map((e) =>
-                e.generationId === generationId ? { ...e, regradeStatus: "running", regradeError: undefined } : e
-              ) : prev);
+              const iter = entry?.iterations?.[index];
+              if (!entry || !iter) return;
+              const patchIter = (patch: Partial<PostEditIteration>) =>
+                setRunEntries((prev) => prev ? prev.map((e) => {
+                  if (e.generationId !== generationId) return e;
+                  return { ...e, iterations: (e.iterations ?? []).map((it, i) => i === index ? { ...it, ...patch } : it) };
+                }) : prev);
+              patchIter({ regradeStatus: "running", regradeError: undefined });
               try {
                 const regradeResult = await evalsApi.regrade(generationId, {
                   criterion_id: criterionId,
-                  content: entry.postEditContent,
+                  content: iter.content,
                 });
-                setRunEntries((prev) => prev ? prev.map((e) =>
-                  e.generationId === generationId ? { ...e, regradeStatus: "done", regradeResult } : e
-                ) : prev);
+                patchIter({ regradeStatus: "done", regradeResult });
+                const newIterations = (entry.iterations ?? []).map((it, i) =>
+                  i === index ? { ...it, regradeStatus: "done" as StepStatus, regradeResult } : it);
+                evalsApi.chain.save({
+                  criterion_id: criterionId, generation_id: generationId, criterion_name: criterionName,
+                  data: buildChainData(entry, newIterations),
+                }).then(refreshChainIds).catch((err) => console.error("Save chain failed:", err));
               } catch (err) {
-                setRunEntries((prev) => prev ? prev.map((e) =>
-                  e.generationId === generationId ? { ...e, regradeStatus: "error", regradeError: String(err) } : e
-                ) : prev);
+                patchIter({ regradeStatus: "error", regradeError: String(err) });
                 console.error("Re-grade failed:", err);
               }
             }}
           />
         </div>
       )}
+
+      <ChatChainModal
+        open={!!viewChat}
+        onOpenChange={(v) => { if (!v) setViewChat(null); }}
+        request={viewChat?.request ?? null}
+        title={viewChat?.title ?? "Chat chain"}
+      />
     </div>
   );
 }
@@ -686,9 +1022,18 @@ function ExamplesCell({ examples, onSaveAll }: { examples?: string[]; onSaveAll:
   return (
     <div className="space-y-1">
       {existing.map((e, i) => (
-        <p key={i} className="text-xs italic text-muted-foreground">
-          <InlineEdit value={e ?? ""} onSave={(v) => commitEdit(i, v)} placeholder={`Example ${i + 1}`} />
-        </p>
+        <div key={i} className="flex items-start gap-1 group/ex">
+          <p className="flex-1 text-xs italic text-muted-foreground">
+            <InlineEdit value={e ?? ""} onSave={(v) => commitEdit(i, v)} placeholder={`Example ${i + 1}`} />
+          </p>
+          <button
+            onClick={() => onSaveAll(existing.filter((_, j) => j !== i))}
+            title="Delete example"
+            className="mt-0.5 shrink-0 text-muted-foreground/40 opacity-0 transition-opacity hover:text-destructive group-hover/ex:opacity-100"
+          >
+            <Trash2 className="h-3 w-3" />
+          </button>
+        </div>
       ))}
       {adding && (
         <input

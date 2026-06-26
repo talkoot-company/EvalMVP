@@ -56,9 +56,21 @@ const BASE_SCHEMA = `
     generation_type       TEXT NOT NULL,
     PRIMARY KEY (criteria_content_type, generation_type)
   );
+  CREATE TABLE IF NOT EXISTS refinement_chains (
+    id             TEXT PRIMARY KEY,   -- "<criterion_id>::<generation_id>"
+    generation_id  TEXT NOT NULL,
+    criterion_id   TEXT NOT NULL,
+    criterion_name TEXT,
+    data           TEXT NOT NULL,      -- JSON: { original, iterations: [...] }
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+  );
   CREATE INDEX IF NOT EXISTS idx_generations_created_at ON generations (created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_generations_model ON generations (model);
+  CREATE INDEX IF NOT EXISTS idx_refinement_criterion ON refinement_chains (criterion_id);
 `;
+
+const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}`;
 
 const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"] };
 const DATE_COLS = { criteria: ["created_at", "updated_at"], eval_results: ["run_at"] };
@@ -185,6 +197,26 @@ export function createSqliteStore(dbPath) {
     insertEvalResult: (obj) => insertRow("eval_results", obj),
     getEvalResults: (genId) =>
       db.prepare("SELECT * FROM eval_results WHERE generation_id=? ORDER BY run_at DESC").all(genId),
+
+    // refinement chains (saved post-edit / re-grade history per generation+criterion)
+    getChain: (criterionId, generationId) => {
+      const row = db.prepare("SELECT * FROM refinement_chains WHERE id=?").get(chainKey(criterionId, generationId));
+      return row ? { ...row, data: JSON.parse(row.data) } : null;
+    },
+    saveChain: (criterionId, generationId, criterionName, data) => {
+      const id = chainKey(criterionId, generationId);
+      const now = new Date().toISOString();
+      const existing = db.prepare("SELECT created_at FROM refinement_chains WHERE id=?").get(id);
+      db.prepare(
+        `INSERT OR REPLACE INTO refinement_chains
+           (id, generation_id, criterion_id, criterion_name, data, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?)`
+      ).run(id, generationId, criterionId, criterionName ?? null, JSON.stringify(data), existing?.created_at ?? now, now);
+    },
+    deleteChain: (criterionId, generationId) =>
+      db.prepare("DELETE FROM refinement_chains WHERE id=?").run(chainKey(criterionId, generationId)),
+    listChainGenerationIds: (criterionId) =>
+      db.prepare("SELECT generation_id FROM refinement_chains WHERE criterion_id=?").all(criterionId).map((r) => r.generation_id),
 
     // generic (data import/export)
     allRows: (base) => db.prepare(`SELECT * FROM ${base}`).all(),
