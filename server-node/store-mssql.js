@@ -15,7 +15,11 @@ const PK = {
 const GEN_LIST_COLS =
   "generation_id, model, created_at, system_prompt, last_user_message, " +
   "few_shot_count, temperature, max_tokens, response_content, prompt_tokens, " +
-  "completion_tokens, total_tokens, finish_reason, is_valid";
+  "completion_tokens, total_tokens, finish_reason, is_valid, " +
+  "CASE WHEN product_json IS NOT NULL AND product_json <> '{}' THEN 1 ELSE 0 END AS has_product_data";
+
+// SQL predicate identifying generations with valid (non-empty) stored product data.
+const HAS_PRODUCT_DATA_SQL = "product_json IS NOT NULL AND product_json <> '{}'";
 
 // SQL Server dialect of the type-classification query (CHARINDEX instead of instr).
 const COUNTS_BY_TYPE_SQL = (tbl) => `
@@ -127,6 +131,13 @@ export async function createMssqlStore({ adonet, database, prefix }) {
      );`
   );
 
+  // Self-provision the generations.product_json column (persisted extracted
+  // product record). db/setup_temp_tables.py doesn't create it.
+  await q(
+    `IF COL_LENGTH(N'[dbo].[${prefix}generations]', N'product_json') IS NULL
+     ALTER TABLE [dbo].[${prefix}generations] ADD product_json NVARCHAR(MAX) NULL;`
+  );
+
   const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}`;
 
   const insertRow = async (base, obj) => {
@@ -161,7 +172,7 @@ export async function createMssqlStore({ adonet, database, prefix }) {
       one(`SELECT * FROM ${tbl("criteria")} WHERE LOWER(criteria_name)=LOWER(@p0)`, [name]),
 
     // generations
-    listGenerations: async ({ search, model, limit, offset }) => {
+    listGenerations: async ({ search, model, limit, offset, validProductData }) => {
       const cond = [], params = [];
       if (search) {
         const p = params.length;
@@ -170,6 +181,7 @@ export async function createMssqlStore({ adonet, database, prefix }) {
         params.push(l, l, l);
       }
       if (model) { cond.push(`model=@p${params.length}`); params.push(model); }
+      if (validProductData) cond.push(HAS_PRODUCT_DATA_SQL);
       const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
       const totalRow = await one(`SELECT COUNT(*) AS n FROM ${tbl("generations")} ${where}`, params);
       const rows = await q(
@@ -186,6 +198,26 @@ export async function createMssqlStore({ adonet, database, prefix }) {
         .map((r) => r.model),
     getGeneration: async (id) =>
       fixGeneration(await one(`SELECT * FROM ${tbl("generations")} WHERE generation_id=@p0`, [id])),
+
+    // product data (extracted product record persisted per generation)
+    setProductJson: (generationId, productJson) =>
+      updateRow("generations", "generation_id", generationId, { product_json: productJson }),
+    // For the bulk extraction script. `mode`: "unprocessed" (product_json IS NULL)
+    // or "empty" (product_json = '{}', for a re-attempt via --retry-empty).
+    // Keyset-paginated by generation_id (> afterId) so irrecoverable rows that
+    // stay '{}' don't get re-fetched into an infinite loop.
+    getGenerationsForExtraction: (mode, limit, afterId = "") => {
+      const filter = mode === "empty" ? "product_json = '{}'" : "product_json IS NULL";
+      return q(
+        `SELECT TOP (@p0) generation_id, req_json FROM ${tbl("generations")}
+         WHERE ${filter} AND generation_id > @p1 ORDER BY generation_id`,
+        [limit, afterId],
+      );
+    },
+    countGenerationsForExtraction: async (mode) => {
+      const filter = mode === "empty" ? "product_json = '{}'" : "product_json IS NULL";
+      return (await one(`SELECT COUNT(*) AS n FROM ${tbl("generations")} WHERE ${filter}`)).n;
+    },
 
     // mapping
     getRawMapping: () => q(`SELECT criteria_content_type, generation_type FROM ${tbl("type_mapping")}`),

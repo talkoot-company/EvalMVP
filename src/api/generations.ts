@@ -15,6 +15,9 @@ export interface Generation {
   is_valid: boolean | null;
   req_json: Record<string, unknown> | null;
   resp_json: Record<string, unknown> | null;
+  // True when the generation has a non-empty stored product_json record. Present
+  // on list responses (computed server-side); may be undefined on single GETs.
+  has_product_data?: boolean;
 }
 
 export interface GenerationsPage {
@@ -31,12 +34,13 @@ async function apiFetch<T>(path: string): Promise<T> {
 }
 
 export const generationsApi = {
-  list: (params: { search?: string; model?: string; limit?: number; offset?: number } = {}): Promise<GenerationsPage> => {
+  list: (params: { search?: string; model?: string; limit?: number; offset?: number; validProductData?: boolean } = {}): Promise<GenerationsPage> => {
     const qs = new URLSearchParams();
     if (params.search) qs.set("search", params.search);
     if (params.model) qs.set("model", params.model);
     if (params.limit !== undefined) qs.set("limit", String(params.limit));
     if (params.offset !== undefined) qs.set("offset", String(params.offset));
+    if (params.validProductData) qs.set("valid_product_data", "1");
     return apiFetch(`/generations?${qs}`);
   },
 
