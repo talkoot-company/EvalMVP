@@ -6,6 +6,7 @@ import { UploadCriteriaDialog } from "@/components/UploadCriteriaDialog";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent,
   DropdownMenuSeparator, DropdownMenuTrigger,
@@ -16,7 +17,7 @@ import {
 import { Search, Plus, Trash2, Upload, ChevronDown, ChevronRight, X, FlaskConical } from "lucide-react";
 import type { Criterion } from "@/types";
 import { CRITERIA_TYPES, CONTEXTS, CONTENT_TYPES } from "@/config/hierarchy";
-import { useCriteria, useCreateCriterion, useUpdateCriterion, useDeleteCriterion } from "@/hooks/useCriteria";
+import { useCriteria, useCreateCriterion, useUpdateCriterion, useDeleteCriterion, useToggleActiveCriterion } from "@/hooks/useCriteria";
 import { useTypeMapping } from "@/hooks/useMapping";
 import { useGenerationCountsByType } from "@/hooks/useGenerations";
 
@@ -125,11 +126,12 @@ function FilterDropdown({ label, options, selected, labelMap, onToggle, onClear 
 // Row with inline expand
 // ---------------------------------------------------------------------------
 function CriterionRow({
-  criterion, expanded, onToggle, onSave, onDelete, existingCategories,
+  criterion, expanded, onToggle, onToggleActive, onSave, onDelete, existingCategories,
 }: {
   criterion: Criterion;
   expanded: boolean;
   onToggle(): void;
+  onToggleActive(): void;
   onSave(c: Criterion): void;
   onDelete(): void;
   existingCategories: string[];
@@ -151,11 +153,18 @@ function CriterionRow({
         </TableCell>
 
         <TableCell>
-          <div className="flex items-center gap-2">
-            {!criterion.active && (
-              <Badge variant="outline" className="text-[10px] border-gray-300 text-gray-400 shrink-0">Off</Badge>
-            )}
-            <span className="text-sm font-medium leading-snug">{criterion.criteria_name}</span>
+          <div className="flex items-center gap-2.5">
+            <Switch
+              checked={criterion.active}
+              onClick={(e) => e.stopPropagation()}
+              onCheckedChange={() => onToggleActive()}
+              title={criterion.active ? "Active — click to deactivate" : "Inactive — click to activate"}
+              aria-label={criterion.active ? "Active" : "Inactive"}
+              className="scale-90 shrink-0 data-[state=unchecked]:bg-input"
+            />
+            <span className={`text-sm font-medium leading-snug ${!criterion.active ? "text-muted-foreground" : ""}`}>
+              {criterion.criteria_name}
+            </span>
           </div>
         </TableCell>
 
@@ -229,6 +238,7 @@ const CriteriaPage = () => {
   const createMutation = useCreateCriterion();
   const updateMutation = useUpdateCriterion();
   const deleteMutation = useDeleteCriterion();
+  const toggleActiveMutation = useToggleActiveCriterion();
 
   const [search, setSearch] = useState("");
   const [addOpen, setAddOpen] = useState(false);
@@ -369,6 +379,7 @@ const CriteriaPage = () => {
                   criterion={c}
                   expanded={expandedId === c.id}
                   onToggle={() => handleToggle(c.id)}
+                  onToggleActive={() => toggleActiveMutation.mutate(c.id)}
                   onSave={(updated) => updateMutation.mutate({ id: updated.id, data: updated })}
                   onDelete={() => deleteMutation.mutate(c.id)}
                   existingCategories={existingCategories}

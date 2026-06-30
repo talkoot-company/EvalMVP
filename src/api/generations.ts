@@ -34,13 +34,14 @@ async function apiFetch<T>(path: string): Promise<T> {
 }
 
 export const generationsApi = {
-  list: (params: { search?: string; model?: string; limit?: number; offset?: number; validProductData?: boolean } = {}): Promise<GenerationsPage> => {
+  list: (params: { search?: string; model?: string; limit?: number; offset?: number; validProductData?: boolean; genTypes?: string[] } = {}): Promise<GenerationsPage> => {
     const qs = new URLSearchParams();
     if (params.search) qs.set("search", params.search);
     if (params.model) qs.set("model", params.model);
     if (params.limit !== undefined) qs.set("limit", String(params.limit));
     if (params.offset !== undefined) qs.set("offset", String(params.offset));
     if (params.validProductData) qs.set("valid_product_data", "1");
+    if (params.genTypes && params.genTypes.length) qs.set("gen_types", params.genTypes.join(","));
     return apiFetch(`/generations?${qs}`);
   },
 

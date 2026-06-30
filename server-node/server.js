@@ -314,7 +314,10 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     const limit = Number(req.query.limit ?? 100);
     const offset = Number(req.query.offset ?? 0);
     const validProductData = req.query.valid_product_data === "1" || req.query.valid_product_data === "true";
-    const { total, rows } = await store.listGenerations({ search, model, limit, offset, validProductData });
+    const genTypes = req.query.gen_types
+      ? String(req.query.gen_types).split(",").map((s) => s.trim()).filter(Boolean)
+      : undefined;
+    const { total, rows } = await store.listGenerations({ search, model, limit, offset, validProductData, genTypes });
     res.json({ total, limit, offset, items: rows.map((r) => rowToGeneration(r)) });
   }));
 
