@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { AddCriterionDialog } from "@/components/AddCriterionDialog";
 import { CriterionForm } from "@/components/CriterionForm";
@@ -126,10 +126,11 @@ function FilterDropdown({ label, options, selected, labelMap, onToggle, onClear 
 // Row with inline expand
 // ---------------------------------------------------------------------------
 function CriterionRow({
-  criterion, expanded, onToggle, onToggleActive, onSave, onDelete, existingCategories,
+  criterion, expanded, exiting, onToggle, onToggleActive, onSave, onDelete, existingCategories,
 }: {
   criterion: Criterion;
   expanded: boolean;
+  exiting: boolean;
   onToggle(): void;
   onToggleActive(): void;
   onSave(c: Criterion): void;
@@ -137,12 +138,17 @@ function CriterionRow({
   existingCategories: string[];
 }) {
   const navigate = useNavigate();
+  // While exiting, optimistically reflect the toggled-to state (switch + dimming)
+  // so the row reads as "being hidden" during the animation.
+  const shownActive = exiting ? !criterion.active : criterion.active;
 
   return (
     <>
       {/* Summary row */}
       <TableRow
-        className="cursor-pointer hover:bg-muted/40 transition-colors group"
+        className={`cursor-pointer hover:bg-muted/40 transition-colors group ${
+          exiting ? "pointer-events-none animate-out fade-out-0 slide-out-to-right-6 duration-300 [animation-fill-mode:forwards]" : ""
+        }`}
         onClick={onToggle}
         data-state={expanded ? "selected" : undefined}
       >
@@ -155,14 +161,14 @@ function CriterionRow({
         <TableCell>
           <div className="flex items-center gap-2.5">
             <Switch
-              checked={criterion.active}
+              checked={shownActive}
               onClick={(e) => e.stopPropagation()}
               onCheckedChange={() => onToggleActive()}
-              title={criterion.active ? "Active — click to deactivate" : "Inactive — click to activate"}
-              aria-label={criterion.active ? "Active" : "Inactive"}
+              title={shownActive ? "Active — click to deactivate" : "Inactive — click to activate"}
+              aria-label={shownActive ? "Active" : "Inactive"}
               className="scale-90 shrink-0 data-[state=unchecked]:bg-input"
             />
-            <span className={`text-sm font-medium leading-snug ${!criterion.active ? "text-muted-foreground" : ""}`}>
+            <span className={`text-sm font-medium leading-snug ${!shownActive ? "text-muted-foreground" : ""}`}>
               {criterion.criteria_name}
             </span>
           </div>
@@ -246,6 +252,10 @@ const CriteriaPage = () => {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [wellSpecifiedOnly, setWellSpecifiedOnly] = useState(true);
   const [activeFilter, setActiveFilter] = useState<"active" | "inactive" | "all">("active");
+  // Rows mid-exit-animation (toggled to a state the current filter hides). They
+  // stay rendered until the animation finishes, then get pruned when the refetch
+  // drops them from `filtered`.
+  const [exitingIds, setExitingIds] = useState<Set<string>>(new Set());
 
   const [contextFilter,     toggleContext,     clearContext    ] = useFilter();
   const [typeFilter,        toggleType,        clearType       ] = useFilter();
@@ -290,6 +300,33 @@ const CriteriaPage = () => {
 
   const handleToggle = (id: string) =>
     setExpandedId((prev) => prev === id ? null : id);
+
+  const EXIT_MS = 300;
+  const handleToggleActive = (c: Criterion) => {
+    // Will this toggle move the row out of what the current filter shows?
+    const willHide =
+      (activeFilter === "active" && c.active) ||
+      (activeFilter === "inactive" && !c.active);
+    if (!willHide) {
+      toggleActiveMutation.mutate(c.id);
+      return;
+    }
+    // Play the exit animation first, then persist — so the animation always
+    // shows, even when the API responds instantly.
+    setExitingIds((prev) => new Set(prev).add(c.id));
+    window.setTimeout(() => toggleActiveMutation.mutate(c.id), EXIT_MS);
+  };
+
+  // Drop ids from `exitingIds` once the refetch has removed them from `filtered`
+  // (keeps the set from growing; the row is already unmounted by then).
+  useEffect(() => {
+    setExitingIds((prev) => {
+      if (prev.size === 0) return prev;
+      const visible = new Set(filtered.map((c) => c.id));
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [filtered]);
 
   if (isLoading) {
     return <div className="p-6 flex items-center justify-center h-64 text-muted-foreground text-sm">Loading criteria…</div>;
@@ -378,8 +415,9 @@ const CriteriaPage = () => {
                   key={c.id}
                   criterion={c}
                   expanded={expandedId === c.id}
+                  exiting={exitingIds.has(c.id)}
                   onToggle={() => handleToggle(c.id)}
-                  onToggleActive={() => toggleActiveMutation.mutate(c.id)}
+                  onToggleActive={() => handleToggleActive(c)}
                   onSave={(updated) => updateMutation.mutate({ id: updated.id, data: updated })}
                   onDelete={() => deleteMutation.mutate(c.id)}
                   existingCategories={existingCategories}
