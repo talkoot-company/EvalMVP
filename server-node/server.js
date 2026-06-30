@@ -13,7 +13,10 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-import { runSingleEval, buildEvalMessages, aiClient, llmModel } from "./eval-runner.js";
+import {
+  runSingleEval, buildEvalMessages, aiClient, llmModel,
+  heuristicProductFields, aiExtractProductFields, productDataFromFields, formatProductSection,
+} from "./eval-runner.js";
 import { exportZipBuffer, importZipBuffer, KINDS } from "./data-transfer.js";
 
 // ---------------------------------------------------------------------------
@@ -57,7 +60,55 @@ function rowToGeneration(row, includeRaw = false) {
     }
   }
   d.is_valid = d.is_valid === null || d.is_valid === undefined ? null : Boolean(d.is_valid);
+  // `has_product_data` is a computed 0/1 flag from listGenerations; coerce to bool.
+  if ("has_product_data" in d) d.has_product_data = Boolean(d.has_product_data);
   return d;
+}
+
+const NO_PRODUCT_DATA_WARNING =
+  "No valid product data could be extracted for this generation — it was evaluated against the creative brief only, without a product record to ground claims.";
+
+// Resolve the product data used to ground an eval. Prefers the persisted
+// `product_json` column; if the generation was never processed, extracts it now
+// (heuristic, then optional AI fallback) and persists the result. Returns the
+// productData shape consumed by the eval pipeline plus a warning when no usable
+// product fields are available.
+async function resolveProductDataForGeneration(store, genRow, requestMessages, { allowAi = false, persist = true } = {}) {
+  const warnIfEmpty = (productData) => ({
+    productData,
+    extractionWarning: productData.hasProductJson ? null : NO_PRODUCT_DATA_WARNING,
+  });
+
+  // Already processed → use the stored record (no LLM).
+  if (genRow.product_json != null) {
+    let fields = {};
+    try {
+      fields = typeof genRow.product_json === "string" ? JSON.parse(genRow.product_json) : genRow.product_json;
+    } catch {
+      fields = {};
+    }
+    return warnIfEmpty(productDataFromFields(fields, requestMessages));
+  }
+
+  // Never processed → extract: heuristic first, then AI fallback if allowed.
+  let fields = heuristicProductFields(requestMessages);
+  if ((!fields || !Object.keys(fields).length) && allowAi) {
+    try {
+      fields = await aiExtractProductFields(requestMessages);
+    } catch (err) {
+      console.error(`AI product extraction failed for ${genRow.generation_id}: ${err.message || err}`);
+      fields = null;
+    }
+  }
+  const normalized = fields && Object.keys(fields).length ? fields : {};
+  if (persist) {
+    try {
+      await store.setProductJson(genRow.generation_id, JSON.stringify(normalized));
+    } catch (err) {
+      console.error(`Could not persist product_json for ${genRow.generation_id}: ${err.message || err}`);
+    }
+  }
+  return warnIfEmpty(productDataFromFields(normalized, requestMessages));
 }
 
 class HttpError extends Error {
@@ -102,8 +153,26 @@ function buildMapping(rows) {
   return result;
 }
 
+// The grounding block for a rewrite/eval. Prefers the persisted extracted record
+// (product_json) when present, falling back to the generation's raw last user
+// message for generations that have no stored product record.
+function groundingSection(genRow) {
+  if (genRow.product_json != null) {
+    let fields = {};
+    try {
+      fields = typeof genRow.product_json === "string" ? JSON.parse(genRow.product_json) : genRow.product_json;
+    } catch {
+      fields = {};
+    }
+    if (fields && typeof fields === "object" && Object.keys(fields).length) {
+      return formatProductSection(productDataFromFields(fields, []));
+    }
+  }
+  return genRow.last_user_message || "";
+}
+
 // The exact prompt sent to the LLM to rewrite (post-edit) a piece of copy.
-function buildPostEditPrompt({ systemPrompt, userMessage, originalContent, criterion_name, score, desired_score, rationale, evidence }) {
+function buildPostEditPrompt({ systemPrompt, productSection, originalContent, criterion_name, score, desired_score, rationale, evidence }) {
   let evidenceBlock = "";
   if (Array.isArray(evidence) && evidence.length) {
     evidenceBlock = "\nSpecific passages flagged:\n" +
@@ -115,7 +184,7 @@ function buildPostEditPrompt({ systemPrompt, userMessage, originalContent, crite
 ${systemPrompt}
 
 --- PRODUCT DATA ---
-${userMessage}
+${productSection}
 
 --- ORIGINAL COPY ---
 ${originalContent}
@@ -244,7 +313,8 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     const model = req.query.model || "";
     const limit = Number(req.query.limit ?? 100);
     const offset = Number(req.query.offset ?? 0);
-    const { total, rows } = await store.listGenerations({ search, model, limit, offset });
+    const validProductData = req.query.valid_product_data === "1" || req.query.valid_product_data === "true";
+    const { total, rows } = await store.listGenerations({ search, model, limit, offset, validProductData });
     res.json({ total, limit, offset, items: rows.map((r) => rowToGeneration(r)) });
   }));
 
@@ -319,9 +389,15 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     }
     const criterion = rowToCriterion(critRow);
 
+    // Resolve grounding product data (stored column → heuristic → AI fallback,
+    // persisting the result so future runs and the filter can use it).
+    const { productData, extractionWarning } = await resolveProductDataForGeneration(
+      store, genRow, requestMessages, { allowAi: true },
+    );
+
     let result;
     try {
-      result = await runSingleEval(copyText, requestMessages, criterion);
+      result = await runSingleEval(copyText, productData, criterion);
     } catch (err) {
       throw new HttpError(500, `Eval failed: ${err.message || err}`);
     }
@@ -360,6 +436,7 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       product_name: result.product_name ?? "",
       run_at: now,
       html_report: htmlPath,
+      extraction_warning: extractionWarning,
     });
   }));
 
@@ -397,9 +474,13 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     }
     const criterion = rowToCriterion(critRow);
 
+    const { productData, extractionWarning } = await resolveProductDataForGeneration(
+      store, genRow, requestMessages, { allowAi: true },
+    );
+
     let result;
     try {
-      result = await runSingleEval(content, requestMessages, criterion);
+      result = await runSingleEval(content, productData, criterion);
     } catch (err) {
       throw new HttpError(500, `Re-grade failed: ${err.message || err}`);
     }
@@ -413,6 +494,7 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       rationale: result.rationale,
       evidence: result.evidence,
       product_name: result.product_name ?? "",
+      extraction_warning: extractionWarning,
     });
   }));
 
@@ -468,7 +550,9 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     if (!genRow) throw new HttpError(404, "Generation not found");
 
     const systemPrompt = genRow.system_prompt || "";
-    const userMessage = genRow.last_user_message || "";
+    // Ground the rewrite in the persisted extracted product record when present,
+    // else the generation's raw last user message.
+    const productSection = groundingSection(genRow);
     // The copy to improve: the supplied content (e.g. a prior post-edit, for
     // iterative refinement) or the generation's original output. The system
     // prompt + product data above always come from the generation so each
@@ -479,7 +563,7 @@ export function createApp({ store, resultsDir, staticDir = null }) {
 
     const postEditPrompt = buildPostEditPrompt({
       systemPrompt,
-      userMessage,
+      productSection,
       originalContent,
       criterion_name: body.criterion_name,
       score: body.score,
@@ -513,13 +597,13 @@ export function createApp({ store, resultsDir, staticDir = null }) {
 
     if (mode === "postedit") {
       const systemPrompt = genRow.system_prompt || "";
-      const userMessage = genRow.last_user_message || "";
+      const productSection = groundingSection(genRow);
       const originalContent = (typeof body.content === "string" && body.content.trim())
         ? body.content
         : (genRow.response_content || "");
       const prompt = buildPostEditPrompt({
         systemPrompt,
-        userMessage,
+        productSection,
         originalContent,
         criterion_name: body.criterion_name,
         score: body.score,
@@ -558,7 +642,13 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       ? body.content
       : (genRow.response_content || "");
 
-    res.json({ mode, messages: buildEvalMessages(content, requestMessages, criterion) });
+    // Preview only: resolve from the stored column or heuristic — never trigger
+    // an AI extraction or persist as a side-effect of opening the modal.
+    const { productData } = await resolveProductDataForGeneration(
+      store, genRow, requestMessages, { allowAi: false, persist: false },
+    );
+
+    res.json({ mode, messages: buildEvalMessages(content, productData, criterion) });
   }));
 
   // ----- Data import/export -----

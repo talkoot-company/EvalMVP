@@ -4,6 +4,7 @@ import type { Generation } from "@/api/generations";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -168,6 +169,7 @@ const GenerationsPage = () => {
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [modelFilter, setModelFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState<ContentType | "all">("all");
+  const [validProductDataOnly, setValidProductDataOnly] = useState(true);
   const [page, setPage] = useState(0);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -176,6 +178,7 @@ const GenerationsPage = () => {
   const { data, isLoading } = useGenerations({
     search: debouncedSearch,
     model: modelFilter === "all" ? "" : modelFilter,
+    validProductData: validProductDataOnly,
     limit: PAGE_SIZE,
     offset: page * PAGE_SIZE,
   });
@@ -249,6 +252,14 @@ const GenerationsPage = () => {
             ))}
           </SelectContent>
         </Select>
+
+        <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none">
+          <Switch
+            checked={validProductDataOnly}
+            onCheckedChange={(v) => { setValidProductDataOnly(v); setPage(0); }}
+          />
+          Valid product data only
+        </label>
       </div>
 
       {/* Table */}

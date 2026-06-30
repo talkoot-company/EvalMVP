@@ -36,32 +36,142 @@ async function callLlm(messages) {
 // Product data extraction
 // ---------------------------------------------------------------------------
 
-function extractLastUserMessage(requestMessages) {
-  for (let i = requestMessages.length - 1; i >= 0; i--) {
-    if (requestMessages[i]?.role === "user") return requestMessages[i].content || "";
-  }
-  return "";
+// Return every user message's text, oldest → newest. Generations are often
+// multi-turn (few-shot briefs), so the product record may not be in the last one.
+function userMessages(requestMessages) {
+  return requestMessages.filter((m) => m?.role === "user").map((m) => m.content || "");
 }
 
-function parseProductJson(text) {
-  const match = /\{[^{}]+\}/.exec(text);
-  if (!match) return {};
+// Extract the first brace-balanced JSON object from `text`. The old flat regex
+// (/\{[^{}]+\}/) broke on any nested braces and only captured up to the first
+// '}', so it silently truncated or missed real product records.
+function extractBalancedJson(text) {
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+// Many generations (esp. Bullets/Description rewrites) name the product inline as
+// free text rather than a JSON blob — e.g. "…to match this product Diet Coke
+// Bottles, 1 Liter, 4 Pack." or "Using this product: Sprite Zero Cans, 355 mL".
+// Pull the product title out of those phrasings.
+const INLINE_PRODUCT_INTRO =
+  /(?:to match|for|using|modify[^.]*?to match)\s+(?:this|the)\s+product\s*:?\s*|(?:this|the)\s+product\s+is\s*:?\s*/i;
+// Words that begin the next instruction/sentence and so mark the end of the name.
+const INLINE_PRODUCT_STOP =
+  /\s(?:Take|Update|Create|Write|Make|Generate|Reply|Return|Do|Don't|Only|Keep|Focus|Ensure|Maintain|You|Here|Please|Use|Follow|Avoid|Include|Based|Given)\b/;
+
+function inlineProductFields(text) {
+  const m = INLINE_PRODUCT_INTRO.exec(text);
+  if (!m) return null;
+  let rest = text.slice(m.index + m[0].length).split(/\r?\n/)[0];
+  const dot = rest.search(/\.\s|\.$/);
+  if (dot >= 0) rest = rest.slice(0, dot);
+  const stop = INLINE_PRODUCT_STOP.exec(rest);
+  if (stop) rest = rest.slice(0, stop.index);
+  const name = rest.trim().replace(/^[:\-\s]+|[.;:,\s]+$/g, "");
+  if (name.length >= 3 && name.length <= 160 && /[a-z]/i.test(name)) return { Title: name };
+  return null;
+}
+
+// TIER 1 (heuristic, free): recover the product data embedded in the request.
+// First looks for a JSON product object (scanning user messages newest → oldest);
+// failing that, falls back to the inline "to match this product X" phrasing.
+// Returns a non-empty object or null.
+export function heuristicProductFields(requestMessages) {
+  const msgs = userMessages(requestMessages);
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const blob = extractBalancedJson(msgs[i]);
+    if (!blob) continue;
+    try {
+      const obj = JSON.parse(blob);
+      if (obj && typeof obj === "object" && !Array.isArray(obj) && Object.keys(obj).length) {
+        return obj;
+      }
+    } catch {
+      // not JSON — keep scanning
+    }
+  }
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const fields = inlineProductFields(msgs[i]);
+    if (fields) return fields;
+  }
+  return null;
+}
+
+// TIER 2 (AI, costs an LLM call): extract product attributes regardless of the
+// key names used. Returns a flat object, or {} when the content has no concrete
+// product data (only generic writing/voice instructions). Throws on API error.
+export async function aiExtractProductFields(requestMessages) {
+  const content = userMessages(requestMessages).join("\n\n---\n\n").trim();
+  if (!content) return {};
+  const prompt = `You are a data-extraction tool. From the content below, extract ALL concrete product information into a single flat JSON object. Use the original field labels where present (e.g. "Title", "Brand Name", "Description", "Keywords", "Ingredients", "Flavor", "Pack Size"). Include every product attribute you can find.
+
+If the content contains NO concrete product data — for example only generic writing instructions, brand-voice/tone guidance, or image descriptions — return exactly {} (an empty object).
+
+Return ONLY the JSON object, no commentary.
+
+CONTENT:
+${content}`;
+  const response = await aiClient().chat.completions.create({
+    model: llmModel(),
+    messages: [{ role: "user", content: prompt }],
+  });
+  const raw = response.choices[0]?.message?.content || "";
+  const cleaned = raw.replaceAll("```json", "").replaceAll("```", "").trim();
   try {
-    return JSON.parse(match[0]);
+    const obj = JSON.parse(cleaned);
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) return obj;
   } catch {
-    return {};
+    // unparseable → treat as no data
   }
+  return {};
 }
 
-export function extractProductData(requestMessages) {
-  const raw = parseProductJson(extractLastUserMessage(requestMessages));
-  const splitSemi = (value) => (value || "").split(";").map((v) => v.trim()).filter(Boolean);
+const NAME_KEYS = ["Title", "Model Name", "Product Name", "Brand Name"];
+export function deriveProductName(fields) {
+  if (!fields || typeof fields !== "object") return "Unknown Product";
+  const key = NAME_KEYS.find((k) => fields[k] != null && String(fields[k]).trim());
+  return (key ? String(fields[key]).trim() : "") || "Unknown Product";
+}
+
+// Build the productData shape consumed by the eval pipeline from a (possibly
+// empty) product fields object. The dataset has a varied schema, so we pass the
+// whole record through rather than cherry-picking fixed fields. When there are no
+// fields (e.g. a multi-turn creative brief), fall back to the free-text user
+// instructions so the evaluator still has brand/voice context to grade against.
+export function productDataFromFields(fields, requestMessages) {
+  const hasFields = fields && typeof fields === "object" && Object.keys(fields).length > 0;
   return {
-    product_name: raw["Model Name"] || raw["Title"] || "Unknown Product",
-    keywords: splitSemi(raw["Keywords"]),
-    lcm_claims: splitSemi(raw["LCM Claims"]),
-    optiva_claims: splitSemi(raw["Optiva Claims"]),
+    product_name: hasFields ? deriveProductName(fields) : "Unknown Product",
+    fields: hasFields ? fields : {},
+    briefs: hasFields ? [] : userMessages(requestMessages).map((s) => s.trim()).filter(Boolean),
+    hasProductJson: !!hasFields,
   };
+}
+
+// Resolve product data using only the cheap heuristic (no LLM). Routes that may
+// fall back to AI / a stored column build productData themselves.
+export function extractProductData(requestMessages) {
+  return productDataFromFields(heuristicProductFields(requestMessages), requestMessages);
 }
 
 // ---------------------------------------------------------------------------
@@ -126,18 +236,30 @@ function desiredScore(criteriaType, evalDefinition) {
 // Prompt construction
 // ---------------------------------------------------------------------------
 
-function formatProductSection(productData) {
-  const lines = [`PRODUCT NAME: ${productData.product_name || ""}`];
-  if (productData.keywords?.length) lines.push("KEYWORDS: " + productData.keywords.join(", "));
-  if (productData.lcm_claims?.length) {
-    lines.push("APPROVED LCM CLAIMS:");
-    for (const c of productData.lcm_claims) lines.push(`  - ${c}`);
+export function formatProductSection(productData) {
+  // Pass the full product record through so the evaluator can ground its
+  // judgement (and catch hallucinated claims) against every available field.
+  if (productData.hasProductJson) {
+    const lines = [];
+    for (const [key, value] of Object.entries(productData.fields)) {
+      if (value == null) continue;
+      const val = Array.isArray(value) ? value.join(", ") : String(value).trim();
+      if (val) lines.push(`${key}: ${val}`);
+    }
+    return lines.length ? lines.join("\n") : "(No product data available.)";
   }
-  if (productData.optiva_claims?.length) {
-    lines.push("APPROVED OPTIVA CLAIMS:");
-    for (const c of productData.optiva_claims) lines.push(`  - ${c}`);
+
+  // No structured record (e.g. a multi-turn creative brief) — give the judge
+  // the instructions that produced the copy as the only available context.
+  if (productData.briefs?.length) {
+    return [
+      "No structured product record was attached to this generation.",
+      "Creative brief / instructions provided:",
+      ...productData.briefs.map((b) => `  - ${b}`),
+    ].join("\n");
   }
-  return lines.join("\n");
+
+  return "(No product data available.)";
 }
 
 export function buildEvalPrompt(criterion, copyText, productData) {
@@ -175,11 +297,10 @@ Return ONLY a JSON object with these exact fields:
 Example: {"score": 3, "rationale": "The copy speaks directly to the reader.", "evidence": ["Fuel your moments", "feel good about your choice"]}`;
 }
 
-// The exact chat chain sent to the LLM to grade `copyText` (product data from
-// requestMessages is embedded in the prompt). Used by the eval and to preview
-// the chain without calling the model.
-export function buildEvalMessages(copyText, requestMessages, criterion) {
-  const productData = extractProductData(requestMessages);
+// The exact chat chain sent to the LLM to grade `copyText`. `productData` is the
+// resolved product record (from the stored column, heuristic, or AI) embedded in
+// the prompt. Used by the eval and to preview the chain without calling the model.
+export function buildEvalMessages(copyText, productData, criterion) {
   const prompt = buildEvalPrompt(criterion, copyText, productData);
   return [{ role: "user", content: prompt }];
 }
@@ -188,12 +309,11 @@ export function buildEvalMessages(copyText, requestMessages, criterion) {
 // Main eval entry point
 // ---------------------------------------------------------------------------
 
-export async function runSingleEval(copyText, requestMessages, criterion) {
-  const productData = extractProductData(requestMessages);
+export async function runSingleEval(copyText, productData, criterion) {
   const criteriaType = criterion.criteria_type || "numerical-scale";
   const evalDefinition = criterion.eval_definition || {};
 
-  const messages = buildEvalMessages(copyText, requestMessages, criterion);
+  const messages = buildEvalMessages(copyText, productData, criterion);
   const result = await callLlm(messages);
 
   let score = "", rationale = "", evidence = [];

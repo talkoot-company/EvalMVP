@@ -9,6 +9,7 @@ import type { Criterion } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -16,7 +17,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
-import { ArrowLeft, ChevronLeft, ChevronRight, Play, Loader2, CheckCircle2, XCircle, Pencil, EyeOff, Eye, Trash2, History, MessageSquare } from "lucide-react";
+import { ArrowLeft, ChevronLeft, ChevronRight, Play, Loader2, CheckCircle2, XCircle, Pencil, EyeOff, Eye, Trash2, History, MessageSquare, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -384,6 +385,12 @@ function TestRunResults({
               {/* Result detail */}
               {entry.status === "done" && entry.result && (
                 <div className="space-y-2 pt-1">
+                  {entry.result.extraction_warning && (
+                    <div className="flex items-start gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                      <span>{entry.result.extraction_warning}</span>
+                    </div>
+                  )}
                   <p className="text-sm leading-relaxed">{entry.result.rationale}</p>
                   {entry.result.evidence.length > 0 && (
                     <div className="flex flex-wrap gap-1.5">
@@ -608,6 +615,7 @@ function MatchingGenerationsTable({
   const [runEntries, setRunEntries] = useState<RunEntry[] | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [viewChat, setViewChat] = useState<{ request: ChatMessagesRequest; title: string } | null>(null);
+  const [validProductDataOnly, setValidProductDataOnly] = useState(true);
 
   function toggleTestSet(generationId: string) {
     setTestSet((prev) => {
@@ -716,9 +724,11 @@ function MatchingGenerationsTable({
   const matching = useMemo<Generation[]>(() => {
     if (!allGenerations?.items) return [];
     return allGenerations.items.filter(
-      (g) => applicableGenTypes.includes(inferType(g.system_prompt)),
+      (g) =>
+        applicableGenTypes.includes(inferType(g.system_prompt)) &&
+        (!validProductDataOnly || g.has_product_data),
     );
-  }, [allGenerations, applicableGenTypes]);
+  }, [allGenerations, applicableGenTypes, validProductDataOnly]);
 
   const totalPages = Math.ceil(matching.length / PAGE_SIZE);
   const pageItems = matching.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -780,7 +790,14 @@ function MatchingGenerationsTable({
           )}
         </span>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+            <Switch
+              checked={validProductDataOnly}
+              onCheckedChange={(v) => { setValidProductDataOnly(v); setPage(0); }}
+            />
+            Valid product data only
+          </label>
           {testSet.size > 0 && (
             <Button size="sm" onClick={handleRunTest} disabled={isRunning}>
               {isRunning ? (

@@ -9,7 +9,7 @@ export function useGenerationCountsByType() {
   });
 }
 
-export function useGenerations(params: { search?: string; model?: string; limit?: number; offset?: number } = {}) {
+export function useGenerations(params: { search?: string; model?: string; limit?: number; offset?: number; validProductData?: boolean } = {}) {
   return useQuery({
     queryKey: ["generations", params],
     queryFn: () => generationsApi.list(params),

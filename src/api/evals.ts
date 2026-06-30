@@ -17,6 +17,8 @@ export interface EvalResult {
   product_name: string;
   run_at: string;
   html_report: string | null;
+  // Set when no valid product data could be extracted to ground this eval.
+  extraction_warning?: string | null;
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {

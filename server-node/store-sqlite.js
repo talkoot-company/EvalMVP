@@ -43,7 +43,8 @@ const BASE_SCHEMA = `
     finish_reason       TEXT,
     is_valid            INTEGER,
     req_json            TEXT,
-    resp_json           TEXT
+    resp_json           TEXT,
+    product_json        TEXT
   );
   CREATE TABLE IF NOT EXISTS eval_results (
     id TEXT PRIMARY KEY, generation_id TEXT NOT NULL,
@@ -100,7 +101,11 @@ const COUNTS_BY_TYPE_SQL = `
 const GEN_LIST_COLS =
   "generation_id, model, created_at, system_prompt, last_user_message, " +
   "few_shot_count, temperature, max_tokens, response_content, prompt_tokens, " +
-  "completion_tokens, total_tokens, finish_reason, is_valid";
+  "completion_tokens, total_tokens, finish_reason, is_valid, " +
+  "CASE WHEN product_json IS NOT NULL AND product_json <> '{}' THEN 1 ELSE 0 END AS has_product_data";
+
+// SQL predicate identifying generations with valid (non-empty) stored product data.
+const HAS_PRODUCT_DATA_SQL = "product_json IS NOT NULL AND product_json <> '{}'";
 
 function coerceWrite(base, obj) {
   const out = { ...obj };
@@ -120,6 +125,11 @@ export function createSqliteStore(dbPath) {
   db.exec(BASE_SCHEMA);
   try {
     db.exec("ALTER TABLE criteria ADD COLUMN notes TEXT");
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec("ALTER TABLE generations ADD COLUMN product_json TEXT");
   } catch {
     /* column already exists */
   }
@@ -163,7 +173,7 @@ export function createSqliteStore(dbPath) {
       db.prepare("SELECT * FROM criteria WHERE LOWER(criteria_name)=LOWER(?)").get(name) || null,
 
     // generations
-    listGenerations: ({ search, model, limit, offset }) => {
+    listGenerations: ({ search, model, limit, offset, validProductData }) => {
       const cond = [], params = [];
       if (search) {
         cond.push("(last_user_message LIKE ? OR response_content LIKE ? OR system_prompt LIKE ?)");
@@ -171,6 +181,7 @@ export function createSqliteStore(dbPath) {
         params.push(l, l, l);
       }
       if (model) { cond.push("model=?"); params.push(model); }
+      if (validProductData) cond.push(HAS_PRODUCT_DATA_SQL);
       const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
       const total = db.prepare(`SELECT COUNT(*) AS n FROM generations ${where}`).get(...params).n;
       const rows = db.prepare(
@@ -182,6 +193,24 @@ export function createSqliteStore(dbPath) {
     listGenerationModels: () =>
       db.prepare("SELECT DISTINCT model FROM generations WHERE model IS NOT NULL ORDER BY model").all().map((r) => r.model),
     getGeneration: (id) => db.prepare("SELECT * FROM generations WHERE generation_id=?").get(id) || null,
+
+    // product data (extracted product record persisted per generation)
+    setProductJson: (generationId, productJson) =>
+      updateRow("generations", "generation_id", generationId, { product_json: productJson }),
+    // For the bulk extraction script. `mode`: "unprocessed" (product_json IS NULL)
+    // or "empty" (product_json = '{}', for a re-attempt via --retry-empty).
+    // Keyset-paginated by generation_id (> afterId) so irrecoverable rows that
+    // stay '{}' don't get re-fetched into an infinite loop.
+    getGenerationsForExtraction: (mode, limit, afterId = "") => {
+      const filter = mode === "empty" ? "product_json = '{}'" : "product_json IS NULL";
+      return db.prepare(
+        `SELECT generation_id, req_json FROM generations WHERE ${filter} AND generation_id > ? ORDER BY generation_id LIMIT ?`
+      ).all(afterId, limit);
+    },
+    countGenerationsForExtraction: (mode) => {
+      const filter = mode === "empty" ? "product_json = '{}'" : "product_json IS NULL";
+      return db.prepare(`SELECT COUNT(*) AS n FROM generations WHERE ${filter}`).get().n;
+    },
 
     // mapping
     getRawMapping: () => db.prepare("SELECT criteria_content_type, generation_type FROM type_mapping").all(),
