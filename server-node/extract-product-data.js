@@ -95,6 +95,17 @@ async function main() {
   const store = await createStore();
   console.log(`[extract] backend=${store.backend} mode=${mode} ai=${args.ai} dryRun=${args.dryRun}`);
 
+  // Persist the keyword-derived generation type (one-time, cheap, indexed) so the
+  // UI can filter generations by type without a per-query full-text scan.
+  if (!args.dryRun && store.classifyGenTypes) {
+    try {
+      const n = await store.classifyGenTypes();
+      if (n) console.log(`[extract] classified gen_type for ${n} generation(s)`);
+    } catch (err) {
+      console.error(`[extract] gen_type classification failed: ${err.message || err}`);
+    }
+  }
+
   let pending = Infinity;
   try {
     pending = await store.countGenerationsForExtraction(mode);

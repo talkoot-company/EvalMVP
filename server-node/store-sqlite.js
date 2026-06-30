@@ -44,7 +44,8 @@ const BASE_SCHEMA = `
     is_valid            INTEGER,
     req_json            TEXT,
     resp_json           TEXT,
-    product_json        TEXT
+    product_json        TEXT,
+    gen_type            TEXT
   );
   CREATE TABLE IF NOT EXISTS eval_results (
     id TEXT PRIMARY KEY, generation_id TEXT NOT NULL,
@@ -76,8 +77,9 @@ const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}
 const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"] };
 const DATE_COLS = { criteria: ["created_at", "updated_at"], eval_results: ["run_at"] };
 
-const COUNTS_BY_TYPE_SQL = `
-  SELECT
+// Generation-type classification (must mirror inferType in the frontend and the
+// mssql store). Used for the by-type counts AND server-side type filtering.
+const TYPE_CASE_SQL = `
     CASE
       WHEN instr(lower(system_prompt), 'bullet') > 0 THEN 'Bullets'
       WHEN instr(lower(system_prompt), 'sustainab') > 0 THEN 'Sustainability'
@@ -91,8 +93,10 @@ const COUNTS_BY_TYPE_SQL = `
         OR instr(lower(system_prompt), 'copywriter') > 0
         OR instr(lower(system_prompt), 'copy') > 0 THEN 'Description'
       ELSE 'Other'
-    END AS type,
-    COUNT(*) AS cnt
+    END`;
+
+const COUNTS_BY_TYPE_SQL = `
+  SELECT ${TYPE_CASE_SQL} AS type, COUNT(*) AS cnt
   FROM generations
   WHERE system_prompt IS NOT NULL
   GROUP BY type
@@ -133,6 +137,12 @@ export function createSqliteStore(dbPath) {
   } catch {
     /* column already exists */
   }
+  try {
+    db.exec("ALTER TABLE generations ADD COLUMN gen_type TEXT");
+  } catch {
+    /* column already exists */
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_generations_gen_type ON generations(gen_type)");
   if (db.prepare("SELECT COUNT(*) AS n FROM type_mapping").get().n === 0) {
     const ins = db.prepare("INSERT OR IGNORE INTO type_mapping VALUES (?,?)");
     for (const [ct, gt] of [
@@ -173,7 +183,7 @@ export function createSqliteStore(dbPath) {
       db.prepare("SELECT * FROM criteria WHERE LOWER(criteria_name)=LOWER(?)").get(name) || null,
 
     // generations
-    listGenerations: ({ search, model, limit, offset, validProductData }) => {
+    listGenerations: ({ search, model, limit, offset, validProductData, genTypes }) => {
       const cond = [], params = [];
       if (search) {
         cond.push("(last_user_message LIKE ? OR response_content LIKE ? OR system_prompt LIKE ?)");
@@ -182,6 +192,10 @@ export function createSqliteStore(dbPath) {
       }
       if (model) { cond.push("model=?"); params.push(model); }
       if (validProductData) cond.push(HAS_PRODUCT_DATA_SQL);
+      if (genTypes && genTypes.length) {
+        cond.push(`gen_type IN (${genTypes.map(() => "?").join(",")})`);
+        params.push(...genTypes);
+      }
       const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
       const total = db.prepare(`SELECT COUNT(*) AS n FROM generations ${where}`).get(...params).n;
       const rows = db.prepare(
@@ -193,6 +207,12 @@ export function createSqliteStore(dbPath) {
     listGenerationModels: () =>
       db.prepare("SELECT DISTINCT model FROM generations WHERE model IS NOT NULL ORDER BY model").all().map((r) => r.model),
     getGeneration: (id) => db.prepare("SELECT * FROM generations WHERE generation_id=?").get(id) || null,
+
+    // Persist the (keyword-derived) generation type so it can be filtered/indexed
+    // cheaply instead of recomputing CHARINDEX/instr over system_prompt per query.
+    // One-time classification of unclassified rows; returns the number updated.
+    classifyGenTypes: () =>
+      db.prepare(`UPDATE generations SET gen_type = (${TYPE_CASE_SQL}) WHERE gen_type IS NULL`).run().changes,
 
     // product data (extracted product record persisted per generation)
     setProductJson: (generationId, productJson) =>

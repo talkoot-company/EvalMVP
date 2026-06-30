@@ -1,6 +1,6 @@
 import { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
+import { useQuery, useQueryClient, useMutation, keepPreviousData } from "@tanstack/react-query";
 import { criteriaApi } from "@/api/criteria";
 import { generationsApi, type Generation } from "@/api/generations";
 import { mappingApi } from "@/api/mapping";
@@ -17,7 +17,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
-import { ArrowLeft, ChevronLeft, ChevronRight, Play, Loader2, CheckCircle2, XCircle, Pencil, EyeOff, Eye, Trash2, History, MessageSquare, AlertTriangle } from "lucide-react";
+import { ArrowLeft, ChevronLeft, ChevronRight, Play, Loader2, CheckCircle2, XCircle, Pencil, EyeOff, Eye, Trash2, History, MessageSquare, AlertTriangle, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -300,6 +300,7 @@ function TestRunResults({
   onClear,
   onCommentsChange,
   onViewChat,
+  onUnselect,
 }: {
   entries: RunEntry[];
   generationsById: Map<string, Generation>;
@@ -308,6 +309,7 @@ function TestRunResults({
   onClear: (generationId: string) => void;
   onCommentsChange: (generationId: string, value: string) => void;
   onViewChat: (request: ChatMessagesRequest, title: string) => void;
+  onUnselect: (generationId: string) => void;
 }) {
   const done = entries.filter((e) => e.status === "done").length;
   const total = entries.length;
@@ -326,7 +328,7 @@ function TestRunResults({
         )}
       </div>
 
-      <div className="space-y-2">
+      <div className="space-y-5">
         {entries.map((entry) => {
           const gen = generationsById.get(entry.generationId);
           const shortId = entry.generationId.slice(0, 8);
@@ -341,11 +343,22 @@ function TestRunResults({
           // original eval. Pre-fills the editable instructions box.
           const driverGrade = lastIter?.regradeResult ?? entry.result;
           const commentsValue = entry.pendingComments ?? driverGrade?.rationale ?? "";
+          // Colored left accent so each eval card is visually distinct: green when
+          // it meets the target score, red when it misses, neutral otherwise.
+          const desired = entry.result?.desired_score;
+          const accent =
+            entry.status === "error" ? "border-l-destructive"
+            : desired && entry.result?.score === desired ? "border-l-green-500"
+            : desired ? "border-l-red-500"
+            : "border-l-muted-foreground/30";
 
           return (
             <div
               key={entry.generationId}
-              className="border rounded-md p-3 space-y-2 bg-background text-sm"
+              className={cn(
+                "rounded-lg border-2 border-l-[6px] p-4 space-y-2 bg-card text-sm shadow-md",
+                accent,
+              )}
             >
               {/* Row header */}
               <div className="flex items-center gap-2 flex-wrap">
@@ -370,6 +383,15 @@ function TestRunResults({
                       <XCircle className="h-3.5 w-3.5" /> Failed
                     </span>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => onUnselect(entry.generationId)}
+                    title="Remove from test set"
+                    aria-label="Remove from test set"
+                    className="ml-0.5 rounded p-0.5 text-muted-foreground/50 transition-colors hover:bg-muted hover:text-destructive"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               </div>
 
@@ -579,20 +601,6 @@ function TestRunResults({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Generation type inference (mirrors GenerationsPage / EvalPanel)
-// ---------------------------------------------------------------------------
-function inferType(systemPrompt: string | null): string {
-  if (!systemPrompt) return "Other";
-  const sp = systemPrompt.toLowerCase();
-  if (sp.includes("bullet")) return "Bullets";
-  if (sp.includes("sustainab")) return "Sustainability";
-  if (sp.includes("extract") || sp.includes("lookup") || sp.includes("identify")) return "Extraction";
-  if (sp.includes("title") || sp.includes("subhead") || sp.includes("naming")) return "Title";
-  if (sp.includes("description") || sp.includes("copywriter") || sp.includes("copy")) return "Description";
-  return "Other";
-}
-
 function formatDate(unix: number | null) {
   if (!unix) return "—";
   return new Date(unix * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -625,6 +633,26 @@ function MatchingGenerationsTable({
       saveTestSet(criterionId, next);
       return next;
     });
+  }
+
+  function clearTestSet() {
+    setTestSet(() => {
+      saveTestSet(criterionId, new Set());
+      return new Set();
+    });
+  }
+
+  // Remove a generation from the test set AND drop its card from the results
+  // (used by the unselect control on each result card).
+  function unselectFromResults(generationId: string) {
+    setTestSet((prev) => {
+      if (!prev.has(generationId)) return prev;
+      const next = new Set(prev);
+      next.delete(generationId);
+      saveTestSet(criterionId, next);
+      return next;
+    });
+    setRunEntries((prev) => (prev ? prev.filter((e) => e.generationId !== generationId) : prev));
   }
 
   const handleRunTest = useCallback(async () => {
@@ -697,10 +725,26 @@ function MatchingGenerationsTable({
     staleTime: 1000 * 60 * 10,
   });
 
-  const { data: allGenerations, isLoading } = useQuery({
-    queryKey: ["generations", { limit: 200 }],
-    queryFn: () => generationsApi.list({ limit: 200 }),
+  const applicableGenTypes = useMemo(
+    () => mapping[contentType] ?? [],
+    [mapping, contentType],
+  );
+
+  // Server-side filtering (by mapped generation type + product data) and
+  // pagination — the dataset has thousands of each type, so loading "the most
+  // recent N" client-side would miss almost all of a less-recent type (e.g.
+  // Bullets). The DB classifies type with the same keyword logic as inferType.
+  const { data, isLoading } = useQuery({
+    queryKey: ["generations-matching", criterionId, applicableGenTypes, validProductDataOnly, page],
+    queryFn: () => generationsApi.list({
+      genTypes: applicableGenTypes,
+      validProductData: validProductDataOnly,
+      limit: PAGE_SIZE,
+      offset: page * PAGE_SIZE,
+    }),
+    enabled: applicableGenTypes.length > 0,
     staleTime: 1000 * 60 * 5,
+    placeholderData: keepPreviousData,
   });
 
   // Which generations already have a saved refinement chain (for the list badge).
@@ -716,43 +760,22 @@ function MatchingGenerationsTable({
     [queryClient, criterionId],
   );
 
-  const applicableGenTypes = useMemo(
-    () => mapping[contentType] ?? [],
-    [mapping, contentType],
-  );
+  const pageItems = data?.items ?? [];
+  const total = data?.total ?? 0;
+  const totalPages = Math.ceil(total / PAGE_SIZE);
 
-  const matching = useMemo<Generation[]>(() => {
-    if (!allGenerations?.items) return [];
-    return allGenerations.items.filter(
-      (g) =>
-        applicableGenTypes.includes(inferType(g.system_prompt)) &&
-        (!validProductDataOnly || g.has_product_data),
-    );
-  }, [allGenerations, applicableGenTypes, validProductDataOnly]);
-
-  const totalPages = Math.ceil(matching.length / PAGE_SIZE);
-  const pageItems = matching.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-
-  const generationsById = useMemo(
-    () => new Map(matching.map((g) => [g.generation_id, g])),
-    [matching],
-  );
-
-  // Reconcile the saved test set against the generations that actually match
-  // this criterion now. Stale ids (from a previous dataset or a different
-  // criterion) are dropped so they don't trigger "Generation not found" and the
-  // selected count stays accurate. Guarded on a non-empty match set so we never
-  // wipe selections while generations/mapping are still loading.
+  // Accumulate generations seen across pages so TestRunResults can preview any
+  // selected generation — including ones picked on a page you've since left.
+  const [genCache, setGenCache] = useState<Map<string, Generation>>(new Map());
   useEffect(() => {
-    if (matching.length === 0) return;
-    const validIds = new Set(matching.map((g) => g.generation_id));
-    setTestSet((prev) => {
-      const pruned = new Set([...prev].filter((id) => validIds.has(id)));
-      if (pruned.size === prev.size) return prev;
-      saveTestSet(criterionId, pruned);
-      return pruned;
+    if (!data?.items?.length) return;
+    setGenCache((prev) => {
+      const next = new Map(prev);
+      for (const g of data.items) next.set(g.generation_id, g);
+      return next;
     });
-  }, [matching, criterionId]);
+  }, [data]);
+  const generationsById = genCache;
 
   if (applicableGenTypes.length === 0) {
     return (
@@ -767,20 +790,11 @@ function MatchingGenerationsTable({
     return <p className="text-sm text-muted-foreground">Loading generations…</p>;
   }
 
-  if (matching.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground">
-        No generations found for type{applicableGenTypes.length > 1 ? "s" : ""}{" "}
-        <strong>{applicableGenTypes.join(", ")}</strong>.
-      </p>
-    );
-  }
-
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <span className="text-xs text-muted-foreground flex items-center flex-wrap gap-1">
-          {matching.length} generation{matching.length !== 1 ? "s" : ""} matching{" "}
+          {total} generation{total !== 1 ? "s" : ""} matching{" "}
           <strong>{contentType}</strong> → type{applicableGenTypes.length > 1 ? "s" : ""}{" "}
           {applicableGenTypes.map((t) => (
             <Badge key={t} variant="outline" className="text-[10px] mx-0.5">{t}</Badge>
@@ -798,6 +812,16 @@ function MatchingGenerationsTable({
             />
             Valid product data only
           </label>
+          {testSet.size > 0 && (
+            <Button
+              size="sm" variant="ghost"
+              className="h-8 text-xs gap-1.5 text-muted-foreground hover:text-destructive"
+              onClick={clearTestSet} disabled={isRunning}
+              title="Remove all generations from the test set"
+            >
+              <X className="h-3.5 w-3.5" /> Clear ({testSet.size})
+            </Button>
+          )}
           {testSet.size > 0 && (
             <Button size="sm" onClick={handleRunTest} disabled={isRunning}>
               {isRunning ? (
@@ -888,7 +912,7 @@ function MatchingGenerationsTable({
 
       {totalPages > 1 && (
         <p className="text-[11px] text-muted-foreground text-right">
-          Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, matching.length)} of {matching.length}
+          Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total}
         </p>
       )}
 
@@ -897,6 +921,7 @@ function MatchingGenerationsTable({
           <TestRunResults
             entries={runEntries}
             generationsById={generationsById}
+            onUnselect={unselectFromResults}
             onViewChat={(request, title) => setViewChat({ request, title })}
             onCommentsChange={(generationId, value) => {
               setRunEntries((prev) => prev ? prev.map((e) =>

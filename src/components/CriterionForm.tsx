@@ -303,12 +303,16 @@ export function CriterionForm({
 
   return (
     <div className="space-y-6">
-      {/* Active toggle + ID */}
+      {/* Active toggle (create only — for existing criteria the active state is
+          controlled by the instant toggle in the list row / detail page, so the
+          form doesn't carry a separate, save-gated copy that could drift) + ID */}
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-muted-foreground">Active</span>
-          <Switch checked={active} onCheckedChange={setActive} />
-        </div>
+        {!isEdit ? (
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">Active</span>
+            <Switch checked={active} onCheckedChange={setActive} />
+          </div>
+        ) : <span />}
         {isEdit && <p className="font-mono text-[11px] text-muted-foreground">{initialCriterion?.id}</p>}
       </div>
 

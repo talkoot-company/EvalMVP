@@ -21,10 +21,9 @@ const GEN_LIST_COLS =
 // SQL predicate identifying generations with valid (non-empty) stored product data.
 const HAS_PRODUCT_DATA_SQL = "product_json IS NOT NULL AND product_json <> '{}'";
 
-// SQL Server dialect of the type-classification query (CHARINDEX instead of instr).
-const COUNTS_BY_TYPE_SQL = (tbl) => `
-  SELECT type, COUNT(*) AS cnt FROM (
-    SELECT CASE
+// Generation-type classification (CHARINDEX dialect; mirrors store-sqlite's
+// TYPE_CASE_SQL and the frontend inferType). Used for by-type counts AND filtering.
+const TYPE_CASE_SQL = `CASE
       WHEN CHARINDEX('bullet', LOWER(system_prompt)) > 0 THEN 'Bullets'
       WHEN CHARINDEX('sustainab', LOWER(system_prompt)) > 0 THEN 'Sustainability'
       WHEN CHARINDEX('extract', LOWER(system_prompt)) > 0
@@ -37,7 +36,12 @@ const COUNTS_BY_TYPE_SQL = (tbl) => `
         OR CHARINDEX('copywriter', LOWER(system_prompt)) > 0
         OR CHARINDEX('copy', LOWER(system_prompt)) > 0 THEN 'Description'
       ELSE 'Other'
-    END AS type
+    END`;
+
+// SQL Server dialect of the type-classification query (CHARINDEX instead of instr).
+const COUNTS_BY_TYPE_SQL = (tbl) => `
+  SELECT type, COUNT(*) AS cnt FROM (
+    SELECT ${TYPE_CASE_SQL} AS type
     FROM ${tbl} WHERE system_prompt IS NOT NULL
   ) t
   GROUP BY type
@@ -137,6 +141,16 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     `IF COL_LENGTH(N'[dbo].[${prefix}generations]', N'product_json') IS NULL
      ALTER TABLE [dbo].[${prefix}generations] ADD product_json NVARCHAR(MAX) NULL;`
   );
+  // Persisted (keyword-derived) generation type + supporting index, so type
+  // filtering is an indexed lookup instead of a per-query CHARINDEX scan.
+  await q(
+    `IF COL_LENGTH(N'[dbo].[${prefix}generations]', N'gen_type') IS NULL
+     ALTER TABLE [dbo].[${prefix}generations] ADD gen_type NVARCHAR(20) NULL;`
+  );
+  await q(
+    `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_${prefix}generations_gen_type')
+     CREATE INDEX [idx_${prefix}generations_gen_type] ON [dbo].[${prefix}generations](gen_type);`
+  );
 
   const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}`;
 
@@ -172,7 +186,7 @@ export async function createMssqlStore({ adonet, database, prefix }) {
       one(`SELECT * FROM ${tbl("criteria")} WHERE LOWER(criteria_name)=LOWER(@p0)`, [name]),
 
     // generations
-    listGenerations: async ({ search, model, limit, offset, validProductData }) => {
+    listGenerations: async ({ search, model, limit, offset, validProductData, genTypes }) => {
       const cond = [], params = [];
       if (search) {
         const p = params.length;
@@ -182,6 +196,11 @@ export async function createMssqlStore({ adonet, database, prefix }) {
       }
       if (model) { cond.push(`model=@p${params.length}`); params.push(model); }
       if (validProductData) cond.push(HAS_PRODUCT_DATA_SQL);
+      if (genTypes && genTypes.length) {
+        const placeholders = genTypes.map((_, i) => `@p${params.length + i}`).join(",");
+        cond.push(`gen_type IN (${placeholders})`);
+        params.push(...genTypes);
+      }
       const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
       const totalRow = await one(`SELECT COUNT(*) AS n FROM ${tbl("generations")} ${where}`, params);
       const rows = await q(
@@ -217,6 +236,22 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     countGenerationsForExtraction: async (mode) => {
       const filter = mode === "empty" ? "product_json = '{}'" : "product_json IS NULL";
       return (await one(`SELECT COUNT(*) AS n FROM ${tbl("generations")} WHERE ${filter}`)).n;
+    },
+
+    // Persist the (keyword-derived) generation type so type filtering is an
+    // indexed lookup, not a per-query CHARINDEX scan. Batched so a single UPDATE
+    // never exceeds the request timeout; each pass flips rows out of the
+    // WHERE gen_type IS NULL set, so it progresses and terminates.
+    classifyGenTypes: async () => {
+      let total = 0, n;
+      do {
+        const r = await pool.request().query(
+          `UPDATE TOP (2000) ${tbl("generations")} SET gen_type = (${TYPE_CASE_SQL}) WHERE gen_type IS NULL`
+        );
+        n = r.rowsAffected?.[0] ?? 0;
+        total += n;
+      } while (n > 0);
+      return total;
     },
 
     // mapping
