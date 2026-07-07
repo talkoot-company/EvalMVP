@@ -43,7 +43,20 @@ function InlineEdit({ value, onSave, multiline = false, minRows = 3, placeholder
   const ref = useRef<HTMLTextAreaElement & HTMLInputElement>(null);
 
   useEffect(() => { setDraft(value); }, [value]);
-  useEffect(() => { if (editing) ref.current?.focus(); }, [editing]);
+
+  // Grow a textarea to fit its content so the edit box matches the wrapped,
+  // multi-line display height instead of being a fixed-height / single-line box.
+  const autosize = (el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  };
+
+  useEffect(() => {
+    if (!editing) return;
+    ref.current?.focus();
+    if (multiline) autosize(ref.current);
+  }, [editing, multiline]);
 
   function commit() {
     setEditing(false);
@@ -57,16 +70,28 @@ function InlineEdit({ value, onSave, multiline = false, minRows = 3, placeholder
 
   if (editing) {
     const shared = {
-      ref,
       value: draft,
-      onChange: (e: React.ChangeEvent<HTMLTextAreaElement | HTMLInputElement>) => setDraft(e.target.value),
       onBlur: commit,
       onKeyDown: handleKeyDown,
       className: `w-full rounded border border-blue-400 bg-blue-50/30 px-2 py-1 text-sm outline-none ring-1 ring-blue-400 resize-none ${className}`,
     };
     return multiline
-      ? <textarea {...shared} style={{ minHeight: `${minRows * 1.6}rem` }} />
-      : <input {...shared} />;
+      ? (
+        <textarea
+          {...shared}
+          ref={ref}
+          rows={minRows}
+          onChange={(e) => { setDraft(e.target.value); autosize(e.target); }}
+          style={{ minHeight: `${minRows * 1.6}rem`, overflow: "hidden" }}
+        />
+      )
+      : (
+        <input
+          {...shared}
+          ref={ref}
+          onChange={(e) => setDraft(e.target.value)}
+        />
+      );
   }
 
   return (
@@ -1108,7 +1133,7 @@ function ExamplesCell({ examples, onSaveAll }: { examples?: string[]; onSaveAll:
       {existing.map((e, i) => (
         <div key={i} className="flex items-start gap-1 group/ex">
           <p className="flex-1 text-xs italic text-muted-foreground">
-            <InlineEdit value={e ?? ""} onSave={(v) => commitEdit(i, v)} placeholder={`Example ${i + 1}`} />
+            <InlineEdit value={e ?? ""} multiline minRows={1} onSave={(v) => commitEdit(i, v)} placeholder={`Example ${i + 1}`} />
           </p>
           <button
             onClick={() => onSaveAll(existing.filter((_, j) => j !== i))}
@@ -1191,7 +1216,7 @@ function ScaleTable({ d, onPatch }: { d: Record<string, { title?: string; defini
             <TableRow key={n}>
               <TableCell><Badge variant="outline">{n}</Badge></TableCell>
               <TableCell>
-                <InlineEdit value={row.title ?? ""} onSave={(v) => onPatch({ [`score_${n}`]: { ...row, title: v } })} placeholder="Add title…" />
+                <InlineEdit value={row.title ?? ""} multiline minRows={1} onSave={(v) => onPatch({ [`score_${n}`]: { ...row, title: v } })} placeholder="Add title…" />
               </TableCell>
               <TableCell>
                 <InlineEdit value={row.definition ?? ""} multiline minRows={5} onSave={(v) => onPatch({ [`score_${n}`]: { ...row, definition: v } })} placeholder="Add definition…" />
@@ -1234,7 +1259,7 @@ function CountTable({ d, onPatch }: { d: { buckets?: string[]; bucket_titles?: R
             <TableRow key={b}>
               <TableCell><Badge variant="outline">{b}</Badge></TableCell>
               <TableCell>
-                <InlineEdit value={d.bucket_titles?.[b] ?? ""} onSave={(v) => onPatch({ bucket_titles: { ...d.bucket_titles, [b]: v } })} placeholder="Add title…" />
+                <InlineEdit value={d.bucket_titles?.[b] ?? ""} multiline minRows={1} onSave={(v) => onPatch({ bucket_titles: { ...d.bucket_titles, [b]: v } })} placeholder="Add title…" />
               </TableCell>
               <TableCell>
                 <InlineEdit value={d.bucket_definitions?.[b] ?? ""} multiline minRows={5} onSave={(v) => onPatch({ bucket_definitions: { ...d.bucket_definitions, [b]: v } })} placeholder="Add definition…" />
