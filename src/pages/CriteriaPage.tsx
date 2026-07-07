@@ -1,7 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { AddCriterionDialog } from "@/components/AddCriterionDialog";
-import { CriterionForm } from "@/components/CriterionForm";
 import { UploadCriteriaDialog } from "@/components/UploadCriteriaDialog";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -17,7 +16,7 @@ import {
 import { Search, Plus, Trash2, Upload, ChevronDown, ChevronRight, X, FlaskConical } from "lucide-react";
 import type { Criterion } from "@/types";
 import { CRITERIA_TYPES, CONTEXTS, CONTENT_TYPES } from "@/config/hierarchy";
-import { useCriteria, useCreateCriterion, useUpdateCriterion, useDeleteCriterion, useToggleActiveCriterion } from "@/hooks/useCriteria";
+import { useCriteria, useCreateCriterion, useDeleteCriterion, useToggleActiveCriterion } from "@/hooks/useCriteria";
 import { useTypeMapping } from "@/hooks/useMapping";
 import { useGenerationCountsByType } from "@/hooks/useGenerations";
 
@@ -123,19 +122,135 @@ function FilterDropdown({ label, options, selected, labelMap, onToggle, onClear 
 }
 
 // ---------------------------------------------------------------------------
+// Read-only detail view (list expansion) — editing happens in the test view
+// ---------------------------------------------------------------------------
+function RubricRow({ label, definition, examples }: { label: string; definition?: string; examples?: string[] }) {
+  const exs = (examples ?? []).filter(Boolean);
+  return (
+    <div className="rounded-md border p-2.5 bg-background space-y-1">
+      <Badge variant="outline" className="text-[10px]">{label}</Badge>
+      {definition
+        ? <p className="text-sm leading-snug">{definition}</p>
+        : <p className="text-xs text-muted-foreground italic">No definition</p>}
+      {exs.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {exs.map((ex, i) => (
+            <span key={i} className="text-xs italic text-muted-foreground bg-muted px-2 py-0.5 rounded">&ldquo;{ex}&rdquo;</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EvalDefReadOnly({ criterion }: { criterion: Criterion }) {
+  if (criterion.criteria_type === "yes-no") {
+    const d = criterion.eval_definition as { definition_yes?: string; definition_no?: string; yes_examples?: string[]; no_examples?: string[] };
+    return (
+      <div className="space-y-2">
+        <RubricRow label="Yes" definition={d.definition_yes} examples={d.yes_examples} />
+        <RubricRow label="No"  definition={d.definition_no}  examples={d.no_examples} />
+      </div>
+    );
+  }
+  if (criterion.criteria_type === "numerical-scale") {
+    const d = criterion.eval_definition as Record<string, { title?: string; definition?: string; example_1?: string; example_2?: string }>;
+    return (
+      <div className="space-y-2">
+        {[1, 2, 3, 4].map((n) => {
+          const s = d[`score_${n}`] ?? {};
+          return <RubricRow key={n} label={s.title ? `${n} — ${s.title}` : String(n)} definition={s.definition} examples={[s.example_1, s.example_2].filter((e): e is string => !!e)} />;
+        })}
+      </div>
+    );
+  }
+  const d = criterion.eval_definition as { buckets?: string[]; bucket_titles?: Record<string, string>; bucket_definitions?: Record<string, string>; bucket_examples?: Record<string, string[]> };
+  const buckets = d.buckets?.length ? d.buckets : ["0", "1", "2", "3+"];
+  return (
+    <div className="space-y-2">
+      {buckets.map((b) => (
+        <RubricRow key={b} label={d.bucket_titles?.[b] ? `${b} — ${d.bucket_titles[b]}` : b} definition={d.bucket_definitions?.[b]} examples={d.bucket_examples?.[b]} />
+      ))}
+    </div>
+  );
+}
+
+function MetaField({ label, value }: { label: string; value?: string | number | null }) {
+  if (value === null || value === undefined || value === "") return null;
+  return (
+    <div>
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="text-sm">{value}</p>
+    </div>
+  );
+}
+
+function CriterionReadOnly({ criterion, onEdit }: { criterion: Criterion; onEdit(): void }) {
+  const scoreTypeLabel =
+    criterion.criteria_type === "yes-no" ? "Yes / No"
+    : criterion.criteria_type === "numerical-scale" ? "Scale 1–4" : "Count";
+  return (
+    <div className="space-y-5 text-sm">
+      <div className="flex items-start justify-between gap-4">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Details</p>
+        <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={onEdit}>
+          <FlaskConical className="h-3.5 w-3.5" /> Open to edit &amp; test
+        </Button>
+      </div>
+
+      <div>
+        <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Criteria definition</p>
+        {criterion.criteria_definition?.trim()
+          ? <p className="leading-relaxed whitespace-pre-wrap">{criterion.criteria_definition}</p>
+          : <p className="text-muted-foreground italic">No definition</p>}
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <MetaField label="Context" value={criterion.context} />
+        <MetaField label="Content type" value={criterion.content_type} />
+        <MetaField label="Category" value={criterion.criteria_category} />
+        <MetaField label="Score type" value={scoreTypeLabel} />
+        <MetaField label="Weight" value={criterion.weight} />
+        <MetaField label="Marketplace" value={criterion.marketplace_tag} />
+        <MetaField label="Brand tag" value={criterion.brand_tag} />
+        <MetaField label="Industry" value={criterion.industry_tag} />
+        <MetaField label="Customer" value={criterion.customer} />
+        <MetaField label="Brand" value={criterion.brand} />
+      </div>
+
+      <div>
+        <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-2">Evaluation definitions</p>
+        <EvalDefReadOnly criterion={criterion} />
+      </div>
+
+      {criterion.notes?.trim() && (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Notes</p>
+          <p className="leading-relaxed whitespace-pre-wrap text-muted-foreground">{criterion.notes}</p>
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-x-6 gap-y-1 pt-2 border-t text-[11px] text-muted-foreground font-mono">
+        <span>id: {criterion.id}</span>
+        {criterion.created_at && <span>created: {criterion.created_at}</span>}
+        {criterion.updated_at && <span>updated: {criterion.updated_at}</span>}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Row with inline expand
 // ---------------------------------------------------------------------------
 function CriterionRow({
-  criterion, expanded, exiting, onToggle, onToggleActive, onSave, onDelete, existingCategories,
+  criterion, expanded, exiting, onToggle, onToggleActive, onDelete,
 }: {
   criterion: Criterion;
   expanded: boolean;
   exiting: boolean;
   onToggle(): void;
   onToggleActive(): void;
-  onSave(c: Criterion): void;
   onDelete(): void;
-  existingCategories: string[];
 }) {
   const navigate = useNavigate();
   // While exiting, optimistically reflect the toggled-to state (switch + dimming)
@@ -218,17 +333,11 @@ function CriterionRow({
         </TableCell>
       </TableRow>
 
-      {/* Expanded detail */}
+      {/* Expanded detail (read-only — edit from the test view) */}
       {expanded && (
         <TableRow className="hover:bg-transparent">
           <TableCell colSpan={8} className="px-10 py-6 bg-muted/20 border-b">
-            <CriterionForm
-              key={criterion.id}
-              initialCriterion={criterion}
-              existingCategories={existingCategories}
-              onSave={(updated) => { onSave(updated); onToggle(); }}
-              onCancel={onToggle}
-            />
+            <CriterionReadOnly criterion={criterion} onEdit={() => navigate(`/criteria/${criterion.id}`)} />
           </TableCell>
         </TableRow>
       )}
@@ -242,7 +351,6 @@ function CriterionRow({
 const CriteriaPage = () => {
   const { data: criteria = [], isLoading } = useCriteria();
   const createMutation = useCreateCriterion();
-  const updateMutation = useUpdateCriterion();
   const deleteMutation = useDeleteCriterion();
   const toggleActiveMutation = useToggleActiveCriterion();
 
@@ -251,6 +359,7 @@ const CriteriaPage = () => {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [wellSpecifiedOnly, setWellSpecifiedOnly] = useState(true);
+  const [hasNotesOnly, setHasNotesOnly] = useState(false);
   const [activeFilter, setActiveFilter] = useState<"active" | "inactive" | "all">("active");
   // Rows mid-exit-animation (toggled to a state the current filter hides). They
   // stay rendered until the animation finishes, then get pruned when the refetch
@@ -282,6 +391,7 @@ const CriteriaPage = () => {
     if (activeFilter === "active"   && !c.active) return false;
     if (activeFilter === "inactive" &&  c.active) return false;
     if (wellSpecifiedOnly && !isWellSpecified(c)) return false;
+    if (hasNotesOnly && !(c.notes ?? "").trim()) return false;
     if (search && !c.criteria_name.toLowerCase().includes(search.toLowerCase()) &&
         !(c.criteria_definition ?? "").toLowerCase().includes(search.toLowerCase())) return false;
     if (contextFilter.size     && !contextFilter.has(c.context))           return false;
@@ -292,7 +402,7 @@ const CriteriaPage = () => {
     if (brandFilter.size       && !brandFilter.has(c.brand_tag ?? ""))     return false;
     if (industryFilter.size    && !industryFilter.has(c.industry_tag ?? "")) return false;
     return true;
-  }), [criteria, search, activeFilter, wellSpecifiedOnly, contextFilter, typeFilter, contentTypeFilter, categoryFilter, marketplaceFilter, brandFilter, industryFilter]);
+  }), [criteria, search, activeFilter, wellSpecifiedOnly, hasNotesOnly, contextFilter, typeFilter, contentTypeFilter, categoryFilter, marketplaceFilter, brandFilter, industryFilter]);
 
   const existingCategories = useMemo(() =>
     Array.from(new Set(criteria.map((c) => c.criteria_category).filter(Boolean))).sort(),
@@ -368,6 +478,13 @@ const CriteriaPage = () => {
           >
             Well-specified only
           </Button>
+          <Button
+            variant={hasNotesOnly ? "default" : "outline"}
+            size="sm" className="h-10 text-xs"
+            onClick={() => setHasNotesOnly((p) => !p)}
+          >
+            Has notes
+          </Button>
           <div className="flex rounded-md border overflow-hidden h-10">
             {(["active", "all", "inactive"] as const).map((opt) => (
               <button
@@ -418,9 +535,7 @@ const CriteriaPage = () => {
                   exiting={exitingIds.has(c.id)}
                   onToggle={() => handleToggle(c.id)}
                   onToggleActive={() => handleToggleActive(c)}
-                  onSave={(updated) => updateMutation.mutate({ id: updated.id, data: updated })}
                   onDelete={() => deleteMutation.mutate(c.id)}
-                  existingCategories={existingCategories}
                 />
               ))
             )}
