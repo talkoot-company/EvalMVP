@@ -17,7 +17,9 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
-import { ArrowLeft, ChevronLeft, ChevronRight, Play, Loader2, CheckCircle2, XCircle, Pencil, EyeOff, Eye, Trash2, History, MessageSquare, AlertTriangle, X } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ArrowLeft, ChevronLeft, ChevronRight, Play, Loader2, CheckCircle2, XCircle, Pencil, EyeOff, Eye, Trash2, History, MessageSquare, AlertTriangle, X, ListTree } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -1029,11 +1031,51 @@ function MatchingGenerationsTable({
 // Eval definition display
 // ---------------------------------------------------------------------------
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, children, id }: { title: string; children: React.ReactNode; id?: string }) {
   return (
-    <div className="space-y-2">
+    <div id={id} className="space-y-2 scroll-mt-6">
       <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">{title}</p>
       {children}
+    </div>
+  );
+}
+
+// Floating quick-navigation: jump to a section on the (long) test page.
+const NAV_SECTIONS = [
+  { id: "sec-overview", label: "Overview" },
+  { id: "sec-definition", label: "Criteria definition" },
+  { id: "sec-eval", label: "Evaluation definitions" },
+  { id: "sec-notes", label: "Notes" },
+  { id: "sec-generations", label: "Applicable generations" },
+];
+
+function SectionNav() {
+  const [open, setOpen] = useState(false);
+  const jump = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setOpen(false);
+  };
+  return (
+    <div className="fixed bottom-6 right-6 z-40">
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button size="icon" className="h-11 w-11 rounded-full shadow-lg" title="Jump to section" aria-label="Jump to section">
+            <ListTree className="h-5 w-5" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent side="top" align="end" className="w-56 p-1.5">
+          <p className="px-2 py-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Jump to</p>
+          {NAV_SECTIONS.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => jump(s.id)}
+              className="block w-full rounded px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted"
+            >
+              {s.label}
+            </button>
+          ))}
+        </PopoverContent>
+      </Popover>
     </div>
   );
 }
@@ -1252,15 +1294,25 @@ export default function CriterionDetailPage() {
     },
   });
 
+  // Persist a patch with a prominent toast, so edits with latency clearly
+  // register as "saving → saved" rather than the previous subtle spinner alone.
+  function saveWithToast(patch: Partial<Criterion>) {
+    toast.promise(saveMutation.mutateAsync(patch), {
+      loading: "Saving…",
+      success: "Saved",
+      error: (e) => `Save failed: ${e instanceof Error ? e.message : String(e)}`,
+    });
+  }
+
   // Patch a top-level field (e.g. criteria_definition)
   function saveField(field: keyof Criterion, value: unknown) {
-    saveMutation.mutate({ [field]: value } as Partial<Criterion>);
+    saveWithToast({ [field]: value } as Partial<Criterion>);
   }
 
   // Patch a nested eval_definition key
   function patchEvalDef(patch: Record<string, unknown>) {
     if (!criterion) return;
-    saveMutation.mutate({
+    saveWithToast({
       eval_definition: { ...(criterion.eval_definition as Record<string, unknown>), ...patch },
     } as Partial<Criterion>);
   }
@@ -1296,11 +1348,23 @@ export default function CriterionDetailPage() {
       </Button>
 
       {/* Header */}
-      <div className="space-y-3">
+      <div id="sec-overview" className="space-y-3 scroll-mt-6">
         <div className="flex items-start gap-3 flex-wrap">
-          <h1 className="text-2xl font-bold tracking-tight">{criterion.criteria_name}</h1>
+          <div className="flex-1 min-w-[240px]">
+            <InlineEdit
+              value={criterion.criteria_name}
+              onSave={(v) => { const t = v.trim(); if (t && t !== criterion.criteria_name) saveField("criteria_name", t); }}
+              placeholder="Criterion name"
+              saving={saveMutation.isPending}
+              className="text-2xl font-bold tracking-tight"
+            />
+          </div>
           <button
-            onClick={() => toggleActiveMutation.mutate()}
+            onClick={() => toast.promise(toggleActiveMutation.mutateAsync(), {
+              loading: "Updating…",
+              success: criterion.active ? "Marked inactive" : "Marked active",
+              error: "Update failed",
+            })}
             disabled={toggleActiveMutation.isPending}
             className="mt-1 flex items-center gap-1.5"
             title={criterion.active ? "Mark as inactive" : "Mark as active"}
@@ -1332,7 +1396,7 @@ export default function CriterionDetailPage() {
       </div>
 
       {/* Definition */}
-      <Section title="Criteria definition">
+      <Section title="Criteria definition" id="sec-definition">
         <InlineEdit
           value={criterion.criteria_definition ?? ""}
           multiline
@@ -1345,12 +1409,12 @@ export default function CriterionDetailPage() {
       </Section>
 
       {/* Eval definition */}
-      <Section title="Evaluation definitions">
+      <Section title="Evaluation definitions" id="sec-eval">
         <EvalDefinitionSection criterion={criterion} onPatch={patchEvalDef} />
       </Section>
 
       {/* Notes */}
-      <Section title="Notes">
+      <Section title="Notes" id="sec-notes">
         <InlineEdit
           value={criterion.notes ?? ""}
           multiline
@@ -1362,7 +1426,7 @@ export default function CriterionDetailPage() {
       </Section>
 
       {/* Matching generations */}
-      <Section title="Applicable generations">
+      <Section title="Applicable generations" id="sec-generations">
         <MatchingGenerationsTable
           key={criterion.id}
           contentType={criterion.content_type}
@@ -1370,6 +1434,8 @@ export default function CriterionDetailPage() {
           criterionName={criterion.criteria_name}
         />
       </Section>
+
+      <SectionNav />
     </div>
   );
 }
