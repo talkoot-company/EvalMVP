@@ -95,11 +95,23 @@ export interface ChatMessage {
   content: string;
 }
 
-// Request to reconstruct the exact chat chain for an eval or a post-edit,
-// WITHOUT calling the LLM (used by the "view chat" modal).
+// One criterion's feedback, aggregated into a multi-criteria rewrite prompt.
+// `criterion_id` is carried so the client can re-grade each criterion on the
+// rewritten copy (the server's rewrite prompt ignores it).
+export interface RewriteFeedbackItem {
+  criterion_id: string;
+  criterion_name: string;
+  score: string;
+  desired_score: string;
+  rationale: string;
+  evidence: string[];
+}
+
+// Request to reconstruct the exact chat chain for an eval, a post-edit, or a
+// rewrite, WITHOUT calling the LLM (used by the "view chat" modal).
 export interface ChatMessagesRequest {
   generation_id: string;
-  mode: "eval" | "postedit";
+  mode: "eval" | "postedit" | "rewrite";
   criterion_id?: string;
   criterion_name?: string;
   content?: string;
@@ -108,6 +120,8 @@ export interface ChatMessagesRequest {
   desired_score?: string;
   rationale?: string;
   evidence?: string[];
+  // Only used for the rewrite chain (the aggregated per-criterion feedback).
+  feedback?: RewriteFeedbackItem[];
 }
 
 export const evalsApi = {
@@ -130,6 +144,14 @@ export const evalsApi = {
     apiFetch("/post-edit", {
       method: "POST",
       body: JSON.stringify(req),
+    }),
+
+  // Rewrite a generation's copy using the aggregated feedback from every
+  // criterion it was evaluated against.
+  rewrite: (generation_id: string, feedback: RewriteFeedbackItem[], content?: string): Promise<{ improved_content: string }> =>
+    apiFetch("/rewrite", {
+      method: "POST",
+      body: JSON.stringify({ generation_id, feedback, content }),
     }),
 
   // Re-grade arbitrary content (e.g. the post-edited copy) against a criterion,

@@ -116,6 +116,20 @@ TYPE_MAPPING_COLUMNS = [
     ("generation_type",       "NVARCHAR(100)", False),
 ]
 
+SUITES_COLUMNS = [
+    ("id",          "NVARCHAR(200)", False),
+    ("name",        "NVARCHAR(500)", False),
+    ("description", "NVARCHAR(MAX)", True),
+    ("active",      "BIT",           False),
+    ("created_at",  "DATETIME2(7)",  False),
+    ("updated_at",  "DATETIME2(7)",  False),
+]
+
+SUITE_CRITERIA_COLUMNS = [
+    ("suite_id",     "NVARCHAR(200)", False),
+    ("criterion_id", "NVARCHAR(200)", False),
+]
+
 # Per-table: column defs + primary key (str or tuple for composite) + source SQLite table.
 TABLES = {
     "criteria":     {"columns": CRITERIA_COLUMNS,     "pk": "id",            "source": "criteria"},
@@ -123,6 +137,9 @@ TABLES = {
     "eval_results": {"columns": EVAL_RESULTS_COLUMNS, "pk": "id",            "source": "eval_results"},
     "type_mapping": {"columns": TYPE_MAPPING_COLUMNS,
                      "pk": ("criteria_content_type", "generation_type"),     "source": "type_mapping"},
+    "suites":       {"columns": SUITES_COLUMNS,       "pk": "id",            "source": "suites"},
+    "suite_criteria": {"columns": SUITE_CRITERIA_COLUMNS,
+                       "pk": ("suite_id", "criterion_id"),                   "source": "suite_criteria"},
 }
 
 
@@ -301,6 +318,16 @@ def main() -> None:
             table = full_name(prefix, base)
             columns = spec["columns"]
             colnames = [c[0] for c in columns]
+
+            # New tables (e.g. suites) may have no SQLite source yet — create-only
+            # for those; the app populates them at runtime.
+            src_exists = src.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (spec["source"],),
+            ).fetchone()
+            if not src_exists:
+                print(f"[load] {table}: skipped (no SQLite source '{spec['source']}')")
+                continue
 
             select_sql = f"SELECT {', '.join(colnames)} FROM {spec['source']}"
             collist = ", ".join(f"[{c}]" for c in colnames)

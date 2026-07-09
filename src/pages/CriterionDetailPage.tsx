@@ -18,101 +18,12 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { InlineEdit } from "@/components/InlineEdit";
+import { ScoreBadge } from "@/components/ScoreBadge";
+import { ChatChainModal } from "@/components/ChatChainModal";
 import { ArrowLeft, ChevronLeft, ChevronRight, Play, Loader2, CheckCircle2, XCircle, Pencil, EyeOff, Eye, Trash2, History, MessageSquare, AlertTriangle, X, ListTree } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-
-// ---------------------------------------------------------------------------
-// Inline editable field
-// ---------------------------------------------------------------------------
-
-interface InlineEditProps {
-  value: string;
-  onSave: (next: string) => void;
-  multiline?: boolean;
-  minRows?: number;
-  placeholder?: string;
-  className?: string;
-  saving?: boolean;
-}
-
-function InlineEdit({ value, onSave, multiline = false, minRows = 3, placeholder = "—", className = "", saving = false }: InlineEditProps) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(value);
-  const [hovered, setHovered] = useState(false);
-  const ref = useRef<HTMLTextAreaElement & HTMLInputElement>(null);
-
-  useEffect(() => { setDraft(value); }, [value]);
-
-  // Grow a textarea to fit its content so the edit box matches the wrapped,
-  // multi-line display height instead of being a fixed-height / single-line box.
-  const autosize = (el: HTMLTextAreaElement | null) => {
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  };
-
-  useEffect(() => {
-    if (!editing) return;
-    ref.current?.focus();
-    if (multiline) autosize(ref.current);
-  }, [editing, multiline]);
-
-  function commit() {
-    setEditing(false);
-    if (draft !== value) onSave(draft);
-  }
-
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (!multiline && e.key === "Enter") { e.preventDefault(); commit(); }
-    if (e.key === "Escape") { setDraft(value); setEditing(false); }
-  }
-
-  if (editing) {
-    const shared = {
-      value: draft,
-      onBlur: commit,
-      onKeyDown: handleKeyDown,
-      className: `w-full rounded border border-blue-400 bg-blue-50/30 px-2 py-1 text-sm outline-none ring-1 ring-blue-400 resize-none ${className}`,
-    };
-    return multiline
-      ? (
-        <textarea
-          {...shared}
-          ref={ref}
-          rows={minRows}
-          onChange={(e) => { setDraft(e.target.value); autosize(e.target); }}
-          style={{ minHeight: `${minRows * 1.6}rem`, overflow: "hidden" }}
-        />
-      )
-      : (
-        <input
-          {...shared}
-          ref={ref}
-          onChange={(e) => setDraft(e.target.value)}
-        />
-      );
-  }
-
-  return (
-    <span
-      className={`group relative inline-block w-full cursor-text rounded px-1 py-0.5 transition-colors ${hovered ? "bg-muted/60 ring-1 ring-muted-foreground/20" : ""} ${className}`}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onClick={() => { setDraft(value); setEditing(true); }}
-    >
-      {saving
-        ? <Loader2 className="inline h-3 w-3 animate-spin text-muted-foreground mr-1" />
-        : null}
-      {value?.trim()
-        ? <span className="whitespace-pre-wrap">{value}</span>
-        : <span className="text-muted-foreground italic">{placeholder}</span>}
-      {hovered && !saving && (
-        <Pencil className="absolute right-1 top-1 h-3 w-3 text-muted-foreground/60 opacity-80" />
-      )}
-    </span>
-  );
-}
 
 const PAGE_SIZE = 10;
 
@@ -221,104 +132,9 @@ function ExpandableContent({ text, className, textClassName }: {
   );
 }
 
-function ScoreBadge({ score, desired }: { score: string; desired: string }) {
-  const passed = desired && score === desired;
-  const failed = desired && score !== desired;
-  const cls = passed
-    ? "bg-green-100 text-green-800 border-green-200"
-    : failed
-    ? "bg-red-100 text-red-800 border-red-200"
-    : "bg-slate-100 text-slate-700 border-slate-200";
-  return (
-    <Badge variant="outline" className={`font-bold px-2.5 py-0.5 ${cls}`}>
-      {desired ? `${score} / ${desired}` : score}
-    </Badge>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // "View chat" modal — reconstructs and shows the exact chat chain (no LLM call)
 // ---------------------------------------------------------------------------
-function ChatChainModal({
-  open,
-  onOpenChange,
-  request,
-  title,
-}: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-  request: ChatMessagesRequest | null;
-  title: string;
-}) {
-  const [messages, setMessages] = useState<ChatMessage[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [raw, setRaw] = useState(false);
-
-  useEffect(() => {
-    if (!open || !request) return;
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setMessages(null);
-    evalsApi
-      .messages(request)
-      .then((r) => { if (!cancelled) setMessages(r.messages); })
-      .catch((e) => { if (!cancelled) setError(String(e)); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [open, request]);
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col gap-3">
-        <DialogHeader>
-          <DialogTitle className="text-base">{title}</DialogTitle>
-          <DialogDescription>
-            The exact chat chain sent to the model — {messages?.length ?? 0} message{messages?.length === 1 ? "" : "s"}.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="flex items-center justify-end -mt-1">
-          <Button
-            size="sm" variant="ghost" className="h-6 text-[11px]"
-            onClick={() => setRaw((v) => !v)}
-            disabled={!messages}
-          >
-            {raw ? "Readable view" : "Raw JSON"}
-          </Button>
-        </div>
-
-        <div className="overflow-y-auto flex-1 space-y-3 pr-1">
-          {loading && (
-            <p className="text-sm text-muted-foreground flex items-center gap-1.5">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Building chat…
-            </p>
-          )}
-          {error && <p className="text-sm text-destructive whitespace-pre-wrap">{error}</p>}
-
-          {messages && !raw && messages.map((m, i) => (
-            <div key={i} className="space-y-1">
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-                {m.role}
-              </p>
-              <pre className="whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 text-xs leading-relaxed font-sans">
-                {m.content}
-              </pre>
-            </div>
-          ))}
-
-          {messages && raw && (
-            <pre className="whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 text-xs leading-relaxed">
-              {JSON.stringify(messages, null, 2)}
-            </pre>
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 function TestRunResults({
   entries,
   generationsById,
