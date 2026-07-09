@@ -67,6 +67,19 @@ const BASE_SCHEMA = `
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS suites (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    description  TEXT,
+    active       INTEGER NOT NULL DEFAULT 1,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS suite_criteria (
+    suite_id     TEXT NOT NULL,
+    criterion_id TEXT NOT NULL,
+    PRIMARY KEY (suite_id, criterion_id)
+  );
   CREATE INDEX IF NOT EXISTS idx_generations_created_at ON generations (created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_generations_model ON generations (model);
   CREATE INDEX IF NOT EXISTS idx_refinement_criterion ON refinement_chains (criterion_id);
@@ -74,8 +87,8 @@ const BASE_SCHEMA = `
 
 const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}`;
 
-const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"] };
-const DATE_COLS = { criteria: ["created_at", "updated_at"], eval_results: ["run_at"] };
+const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"], suites: ["active"] };
+const DATE_COLS = { criteria: ["created_at", "updated_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"] };
 
 // Generation-type classification (must mirror inferType in the frontend and the
 // mssql store). Used for the by-type counts AND server-side type filtering.
@@ -266,6 +279,25 @@ export function createSqliteStore(dbPath) {
       db.prepare("DELETE FROM refinement_chains WHERE id=?").run(chainKey(criterionId, generationId)),
     listChainGenerationIds: (criterionId) =>
       db.prepare("SELECT generation_id FROM refinement_chains WHERE criterion_id=?").all(criterionId).map((r) => r.generation_id),
+
+    // suites (+ suite_criteria junction; mirrors the type_mapping pattern)
+    listSuites: () => db.prepare("SELECT * FROM suites ORDER BY name").all(),
+    getSuite: (id) => db.prepare("SELECT * FROM suites WHERE id=?").get(id) || null,
+    insertSuite: (obj) => insertRow("suites", obj),
+    updateSuite: (id, obj) => updateRow("suites", "id", id, obj),
+    deleteSuite: (id) => {
+      db.transaction(() => {
+        db.prepare("DELETE FROM suite_criteria WHERE suite_id=?").run(id);
+        db.prepare("DELETE FROM suites WHERE id=?").run(id);
+      })();
+    },
+    getSuiteCriterionIds: (suiteId) =>
+      db.prepare("SELECT criterion_id FROM suite_criteria WHERE suite_id=?").all(suiteId).map((r) => r.criterion_id),
+    listAllSuiteCriteria: () => db.prepare("SELECT suite_id, criterion_id FROM suite_criteria").all(),
+    addSuiteCriterion: (suiteId, criterionId) =>
+      db.prepare("INSERT OR IGNORE INTO suite_criteria (suite_id, criterion_id) VALUES (?,?)").run(suiteId, criterionId),
+    removeSuiteCriterion: (suiteId, criterionId) =>
+      db.prepare("DELETE FROM suite_criteria WHERE suite_id=? AND criterion_id=?").run(suiteId, criterionId),
 
     // generic (data import/export)
     allRows: (base) => db.prepare(`SELECT * FROM ${base}`).all(),

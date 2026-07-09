@@ -2,39 +2,19 @@ import { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { AddCriterionDialog } from "@/components/AddCriterionDialog";
 import { UploadCriteriaDialog } from "@/components/UploadCriteriaDialog";
-import { Input } from "@/components/ui/input";
+import { CriteriaFilterBar } from "@/components/CriteriaFilterBar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import {
-  DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent,
-  DropdownMenuSeparator, DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { Search, Plus, Trash2, Upload, ChevronDown, ChevronRight, X, FlaskConical } from "lucide-react";
+import { Plus, Trash2, Upload, ChevronDown, ChevronRight, FlaskConical } from "lucide-react";
 import type { Criterion } from "@/types";
-import { CRITERIA_TYPES, CONTEXTS, CONTENT_TYPES } from "@/config/hierarchy";
 import { useCriteria, useCreateCriterion, useDeleteCriterion, useToggleActiveCriterion } from "@/hooks/useCriteria";
+import { useCriteriaFilters } from "@/hooks/useCriteriaFilters";
 import { useTypeMapping } from "@/hooks/useMapping";
 import { useGenerationCountsByType } from "@/hooks/useGenerations";
-
-// ---------------------------------------------------------------------------
-// Well-specified check
-// ---------------------------------------------------------------------------
-function isWellSpecified(c: Criterion): boolean {
-  if (!c.criteria_definition?.trim()) return false;
-  const whenApplicable = /when applicable|if applicable/i;
-  if (whenApplicable.test(c.criteria_name) || whenApplicable.test(c.criteria_definition ?? "")) return false;
-  const d = c.eval_definition as Record<string, unknown>;
-  if (c.criteria_type === "yes-no")
-    return !!(d.definition_yes || d.definition_no);
-  if (c.criteria_type === "numerical-scale")
-    return [1, 2, 3, 4].some((n) => (d[`score_${n}`] as Record<string, string> | undefined)?.definition);
-  const defs = d.bucket_definitions as Record<string, string> | undefined;
-  return !!defs && Object.values(defs).some((v) => !!v);
-}
 
 // ---------------------------------------------------------------------------
 // Applicable-generation count for a criterion
@@ -54,70 +34,6 @@ function ApplicableCount({ contentType }: { contentType: string }) {
     <span className="tabular-nums text-xs text-muted-foreground">
       {count > 0 ? count : "—"}
     </span>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Filter helpers
-// ---------------------------------------------------------------------------
-const criteriaTypeLabelMap = Object.fromEntries(CRITERIA_TYPES.map((t) => [t.value, t.label]));
-
-// The "Marketplace" filter keys off the marketplace tag, but treats
-// Universal-context criteria (which have no marketplace tag) as "Universal".
-const marketplaceKey = (c: Criterion): string =>
-  c.marketplace_tag || (c.context === "Universal" ? "Universal" : "");
-
-function useFilter(initial: string[] = []): [Set<string>, (v: string) => void, () => void] {
-  const [s, setS] = useState<Set<string>>(() => new Set(initial));
-  const toggle = (v: string) => setS((p) => { const n = new Set(p); if (n.has(v)) n.delete(v); else n.add(v); return n; });
-  const clear = () => setS(new Set());
-  return [s, toggle, clear];
-}
-
-function FilterDropdown({ label, options, selected, labelMap, onToggle, onClear }: {
-  label: string; options: string[]; selected: Set<string>;
-  labelMap?: Record<string, string>; onToggle(v: string): void; onClear(): void;
-}) {
-  const allSelected = selected.size === 0 || selected.size === options.length;
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="outline" className="min-h-10 h-auto py-2 px-3 justify-between font-normal items-start gap-2">
-          <span className="min-w-0 flex-1 text-left space-y-0.5">
-            <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</span>
-            {allSelected ? (
-              <span className="text-sm">All</span>
-            ) : (
-              <div className="flex flex-wrap gap-1">
-                {options.filter((o) => selected.has(o)).map((v) => (
-                  <Badge key={v} variant="secondary" className="h-4 text-[10px] pr-1">
-                    {labelMap?.[v] ?? v}
-                    <span role="button" className="ml-0.5 cursor-pointer"
-                      onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); onToggle(v); }}>
-                      <X className="h-2.5 w-2.5" />
-                    </span>
-                  </Badge>
-                ))}
-              </div>
-            )}
-          </span>
-          <ChevronDown className="h-4 w-4 opacity-50 shrink-0 mt-1" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent className="w-56 max-h-72 overflow-y-auto">
-        <DropdownMenuCheckboxItem checked={allSelected} onSelect={(e) => e.preventDefault()} onCheckedChange={onClear}>
-          All {label}
-        </DropdownMenuCheckboxItem>
-        <DropdownMenuSeparator />
-        {options.map((opt) => (
-          <DropdownMenuCheckboxItem key={opt} checked={selected.has(opt)}
-            onSelect={(e) => e.preventDefault()} onCheckedChange={() => onToggle(opt)}>
-            {labelMap?.[opt] ?? opt}
-          </DropdownMenuCheckboxItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 
@@ -354,55 +270,20 @@ const CriteriaPage = () => {
   const deleteMutation = useDeleteCriterion();
   const toggleActiveMutation = useToggleActiveCriterion();
 
-  const [search, setSearch] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [wellSpecifiedOnly, setWellSpecifiedOnly] = useState(true);
-  const [hasNotesOnly, setHasNotesOnly] = useState(false);
-  const [activeFilter, setActiveFilter] = useState<"active" | "inactive" | "all">("active");
   // Rows mid-exit-animation (toggled to a state the current filter hides). They
   // stay rendered until the animation finishes, then get pruned when the refetch
   // drops them from `filtered`.
   const [exitingIds, setExitingIds] = useState<Set<string>>(new Set());
 
-  const [contextFilter,     toggleContext,     clearContext    ] = useFilter();
-  const [typeFilter,        toggleType,        clearType       ] = useFilter();
-  const [contentTypeFilter, toggleContentType, clearContentType] = useFilter();
-  const [categoryFilter,    toggleCategory,    clearCategory   ] = useFilter();
-  const [marketplaceFilter, toggleMarketplace, clearMarketplace] = useFilter(["Universal"]);
-  const [brandFilter,       toggleBrand,       clearBrand      ] = useFilter();
-  const [industryFilter,    toggleIndustry,    clearIndustry   ] = useFilter();
-
-  const categoryOptions = useMemo(() =>
-    Array.from(new Set(criteria.map((c) => c.criteria_category).filter(Boolean))).sort(),
-    [criteria]);
-  const marketplaceOptions = useMemo(() =>
-    Array.from(new Set(criteria.map(marketplaceKey).filter(Boolean))).sort(),
-    [criteria]);
-  const brandOptions = useMemo(() =>
-    Array.from(new Set(criteria.map((c) => c.brand_tag).filter((v): v is string => !!v))).sort(),
-    [criteria]);
-  const industryOptions = useMemo(() =>
-    Array.from(new Set(criteria.map((c) => c.industry_tag).filter((v): v is string => !!v))).sort(),
-    [criteria]);
-
-  const filtered = useMemo(() => criteria.filter((c) => {
-    if (activeFilter === "active"   && !c.active) return false;
-    if (activeFilter === "inactive" &&  c.active) return false;
-    if (wellSpecifiedOnly && !isWellSpecified(c)) return false;
-    if (hasNotesOnly && !(c.notes ?? "").trim()) return false;
-    if (search && !c.criteria_name.toLowerCase().includes(search.toLowerCase()) &&
-        !(c.criteria_definition ?? "").toLowerCase().includes(search.toLowerCase())) return false;
-    if (contextFilter.size     && !contextFilter.has(c.context))           return false;
-    if (typeFilter.size        && !typeFilter.has(c.criteria_type))         return false;
-    if (contentTypeFilter.size && !contentTypeFilter.has(c.content_type))  return false;
-    if (categoryFilter.size    && !categoryFilter.has(c.criteria_category)) return false;
-    if (marketplaceFilter.size && !marketplaceFilter.has(marketplaceKey(c))) return false;
-    if (brandFilter.size       && !brandFilter.has(c.brand_tag ?? ""))     return false;
-    if (industryFilter.size    && !industryFilter.has(c.industry_tag ?? "")) return false;
-    return true;
-  }), [criteria, search, activeFilter, wellSpecifiedOnly, hasNotesOnly, contextFilter, typeFilter, contentTypeFilter, categoryFilter, marketplaceFilter, brandFilter, industryFilter]);
+  const filters = useCriteriaFilters(criteria, {
+    defaultActive: "active",
+    defaultMarketplace: ["Universal"],
+    defaultWellSpecified: true,
+  });
+  const filtered = filters.filtered;
 
   const existingCategories = useMemo(() =>
     Array.from(new Set(criteria.map((c) => c.criteria_category).filter(Boolean))).sort(),
@@ -415,8 +296,8 @@ const CriteriaPage = () => {
   const handleToggleActive = (c: Criterion) => {
     // Will this toggle move the row out of what the current filter shows?
     const willHide =
-      (activeFilter === "active" && c.active) ||
-      (activeFilter === "inactive" && !c.active);
+      (filters.activeFilter === "active" && c.active) ||
+      (filters.activeFilter === "inactive" && !c.active);
     if (!willHide) {
       toggleActiveMutation.mutate(c.id);
       return;
@@ -458,51 +339,7 @@ const CriteriaPage = () => {
       </div>
 
       {/* Filters */}
-      <div className="space-y-2">
-        <div className="relative max-w-sm">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input placeholder="Search criteria…" value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9" />
-        </div>
-        <div className="flex flex-wrap gap-2 items-start">
-          <FilterDropdown label="Context"      options={CONTEXTS}                             selected={contextFilter}     labelMap={undefined}           onToggle={toggleContext}      onClear={clearContext} />
-          <FilterDropdown label="Score type"   options={CRITERIA_TYPES.map((t) => t.value)} selected={typeFilter}         labelMap={criteriaTypeLabelMap} onToggle={toggleType}        onClear={clearType} />
-          <FilterDropdown label="Content type" options={CONTENT_TYPES}                        selected={contentTypeFilter}  labelMap={undefined}           onToggle={toggleContentType} onClear={clearContentType} />
-          <FilterDropdown label="Category"     options={categoryOptions}                      selected={categoryFilter}     labelMap={undefined}           onToggle={toggleCategory}    onClear={clearCategory} />
-          {marketplaceOptions.length > 0 && <FilterDropdown label="Marketplace" options={marketplaceOptions} selected={marketplaceFilter} onToggle={toggleMarketplace} onClear={clearMarketplace} />}
-          {brandOptions.length > 0      && <FilterDropdown label="Brand"       options={brandOptions}       selected={brandFilter}       onToggle={toggleBrand}       onClear={clearBrand} />}
-          {industryOptions.length > 0   && <FilterDropdown label="Industry"    options={industryOptions}    selected={industryFilter}    onToggle={toggleIndustry}    onClear={clearIndustry} />}
-          <Button
-            variant={wellSpecifiedOnly ? "default" : "outline"}
-            size="sm" className="h-10 text-xs"
-            onClick={() => setWellSpecifiedOnly((p) => !p)}
-          >
-            Well-specified only
-          </Button>
-          <Button
-            variant={hasNotesOnly ? "default" : "outline"}
-            size="sm" className="h-10 text-xs"
-            onClick={() => setHasNotesOnly((p) => !p)}
-          >
-            Has notes
-          </Button>
-          <div className="flex rounded-md border overflow-hidden h-10">
-            {(["active", "all", "inactive"] as const).map((opt) => (
-              <button
-                key={opt}
-                onClick={() => setActiveFilter(opt)}
-                className={`px-3 text-xs font-medium capitalize transition-colors ${
-                  activeFilter === opt
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-background text-muted-foreground hover:bg-muted"
-                } border-r last:border-r-0`}
-              >
-                {opt === "all" ? "All" : opt === "active" ? "Active" : "Inactive"}
-              </button>
-            ))}
-          </div>
-          <span className="text-xs text-muted-foreground self-center ml-1">{filtered.length} of {criteria.length}</span>
-        </div>
-      </div>
+      <CriteriaFilterBar filters={filters} />
 
       {/* Table */}
       <div className="border rounded-md overflow-hidden">

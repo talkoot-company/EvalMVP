@@ -46,6 +46,13 @@ function rowToCriterion(row) {
   return d;
 }
 
+// Normalizes a raw suite row (active is int in SQLite / bool in SQL Server).
+function rowToSuite(row) {
+  const d = { ...row };
+  d.active = Boolean(d.active);
+  return d;
+}
+
 function rowToGeneration(row, includeRaw = false) {
   const d = { ...row };
   for (const field of ["req_json", "resp_json"]) {
@@ -142,6 +149,8 @@ const CRITERIA_COLUMNS = [
   "customer", "brand", "custom_tags", "notes",
 ];
 
+const SUITE_COLUMNS = ["name", "description", "active"];
+
 const GENERATION_TYPES = ["Title", "Description", "Bullets", "Sustainability", "Extraction", "Other"];
 const CRITERIA_CONTENT_TYPES = ["Title", "Description", "Bullets/Specs", "Meta Description"];
 
@@ -198,6 +207,46 @@ Feedback: ${rationale}${evidenceBlock}
 Rewrite the copy to address the evaluation feedback and achieve the target score.
 - Keep the same format and approximate length as the original.
 - Only change what is needed to address the specific feedback.
+- Do not add commentary or explanations — output only the improved copy.
+`;
+}
+
+// The exact prompt sent to the LLM to rewrite copy using the AGGREGATED feedback
+// from every criterion the generation was evaluated against. Passing criteria are
+// flagged as strengths to preserve; failing ones as the changes to make.
+function buildRewritePrompt({ systemPrompt, productSection, originalContent, feedback }) {
+  const items = Array.isArray(feedback) ? feedback : [];
+  const feedbackBlocks = items.map((f, i) => {
+    const passed = String(f.score) === String(f.desired_score);
+    const label = passed
+      ? "PASS — keep this strength"
+      : `NEEDS IMPROVEMENT (target ${f.desired_score})`;
+    let evidenceBlock = "";
+    if (Array.isArray(f.evidence) && f.evidence.length) {
+      evidenceBlock = "\n   Flagged passages:\n" +
+        f.evidence.filter(Boolean).map((e) => `     - "${e}"`).join("\n");
+    }
+    return `${i + 1}. ${f.criterion_name} — ${label} (score ${f.score})\n   Feedback: ${f.rationale}${evidenceBlock}`;
+  }).join("\n\n");
+
+  return `You are an expert product copy editor. Improve the copy below based on evaluation feedback from multiple criteria.
+
+--- ORIGINAL TASK ---
+${systemPrompt}
+
+--- PRODUCT DATA ---
+${productSection}
+
+--- ORIGINAL COPY ---
+${originalContent}
+
+--- EVALUATION FEEDBACK (${items.length} criteri${items.length === 1 ? "on" : "a"}) ---
+${feedbackBlocks}
+
+--- INSTRUCTIONS ---
+Rewrite the copy to satisfy every "NEEDS IMPROVEMENT" criterion while preserving the qualities that already "PASS" — do not regress them.
+- Keep the same format and approximate length as the original.
+- Only change what is needed to fix the failing criteria without breaking the passing ones.
 - Do not add commentary or explanations — output only the improved copy.
 `;
 }
@@ -304,6 +353,86 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     if (!row) throw new HttpError(404, "Criterion not found");
     await store.updateCriterion(req.params.id, { active: row.active ? false : true, updated_at: nowIso() });
     res.json(rowToCriterion(await store.getCriterion(req.params.id)));
+  }));
+
+  // ----- Suites routes (a suite = name + description + associated criteria) -----
+
+  app.get("/api/suites", route(async (req, res) => {
+    const [rows, junction] = await Promise.all([store.listSuites(), store.listAllSuiteCriteria()]);
+    const bySuite = new Map();
+    for (const { suite_id, criterion_id } of junction) {
+      if (!bySuite.has(suite_id)) bySuite.set(suite_id, []);
+      bySuite.get(suite_id).push(criterion_id);
+    }
+    res.json(rows.map((r) => ({ ...rowToSuite(r), criteria_ids: bySuite.get(r.id) ?? [] })));
+  }));
+
+  app.post("/api/suites", route(async (req, res) => {
+    const body = req.body || {};
+    if (!body.name || !String(body.name).trim()) throw new HttpError(422, "name is required");
+    const sid = body.id || slugify(body.name);
+    if (!sid) throw new HttpError(422, "name must contain at least one letter or number");
+    if (await store.getSuite(sid)) throw new HttpError(409, `Suite '${sid}' already exists`);
+    const now = nowIso();
+    await store.insertSuite({
+      id: sid,
+      name: String(body.name).trim(),
+      description: body.description ?? null,
+      active: body.active === false ? false : true,
+      created_at: now,
+      updated_at: now,
+    });
+    res.status(201).json({ ...rowToSuite(await store.getSuite(sid)), criteria_ids: [] });
+  }));
+
+  app.get("/api/suites/:id", route(async (req, res) => {
+    const row = await store.getSuite(req.params.id);
+    if (!row) throw new HttpError(404, "Suite not found");
+    res.json({ ...rowToSuite(row), criteria_ids: await store.getSuiteCriterionIds(req.params.id) });
+  }));
+
+  app.put("/api/suites/:id", route(async (req, res) => {
+    const existing = await store.getSuite(req.params.id);
+    if (!existing) throw new HttpError(404, "Suite not found");
+    const body = req.body || {};
+    const merged = { ...rowToSuite(existing) };
+    for (const col of SUITE_COLUMNS) { if (col in body) merged[col] = body[col]; }
+    await store.updateSuite(req.params.id, {
+      name: merged.name,
+      description: merged.description ?? null,
+      active: merged.active,
+      updated_at: nowIso(),
+    });
+    res.json({ ...rowToSuite(await store.getSuite(req.params.id)), criteria_ids: await store.getSuiteCriterionIds(req.params.id) });
+  }));
+
+  app.delete("/api/suites/:id", route(async (req, res) => {
+    if (!(await store.getSuite(req.params.id))) throw new HttpError(404, "Suite not found");
+    await store.deleteSuite(req.params.id);
+    res.status(204).end();
+  }));
+
+  app.put("/api/suites/:id/toggle-active", route(async (req, res) => {
+    const row = await store.getSuite(req.params.id);
+    if (!row) throw new HttpError(404, "Suite not found");
+    await store.updateSuite(req.params.id, { active: row.active ? false : true, updated_at: nowIso() });
+    res.json({ ...rowToSuite(await store.getSuite(req.params.id)), criteria_ids: await store.getSuiteCriterionIds(req.params.id) });
+  }));
+
+  app.post("/api/suites/:id/criteria", route(async (req, res) => {
+    if (!(await store.getSuite(req.params.id))) throw new HttpError(404, "Suite not found");
+    const criterionId = (req.body || {}).criterion_id;
+    if (!criterionId) throw new HttpError(422, "criterion_id is required");
+    await store.addSuiteCriterion(req.params.id, String(criterionId));
+    await store.updateSuite(req.params.id, { updated_at: nowIso() });
+    res.status(204).end();
+  }));
+
+  app.delete("/api/suites/:id/criteria/:criterionId", route(async (req, res) => {
+    if (!(await store.getSuite(req.params.id))) throw new HttpError(404, "Suite not found");
+    await store.removeSuiteCriterion(req.params.id, req.params.criterionId);
+    await store.updateSuite(req.params.id, { updated_at: nowIso() });
+    res.status(204).end();
   }));
 
   // ----- Generations routes (literal routes must register before /:id) -----
@@ -589,14 +718,64 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     res.json({ improved_content: improved.trim() });
   }));
 
+  // ----- Rewrite route (aggregate feedback across all evaluated criteria) -----
+
+  app.post("/api/rewrite", route(async (req, res) => {
+    const body = req.body || {};
+    const genRow = await store.getGeneration(body.generation_id);
+    if (!genRow) throw new HttpError(404, "Generation not found");
+
+    const systemPrompt = genRow.system_prompt || "";
+    const productSection = groundingSection(genRow);
+    const originalContent = (typeof body.content === "string" && body.content.trim())
+      ? body.content
+      : (genRow.response_content || "");
+
+    const rewritePrompt = buildRewritePrompt({
+      systemPrompt,
+      productSection,
+      originalContent,
+      feedback: body.feedback,
+    });
+
+    let improved;
+    try {
+      const response = await aiClient().chat.completions.create({
+        model: llmModel(),
+        messages: [{ role: "user", content: rewritePrompt }],
+      });
+      improved = response.choices[0]?.message?.content || "";
+    } catch (err) {
+      throw new HttpError(500, `Rewrite failed: ${err.message || err}`);
+    }
+
+    res.json({ improved_content: improved.trim() });
+  }));
+
   // Reconstruct (without calling the LLM) the exact chat chain that was/would be
   // sent for an eval or a post-edit, so the UI can show it in a "view chat" modal.
   app.post("/api/eval/messages", route(async (req, res) => {
     const body = req.body || {};
-    const mode = body.mode === "postedit" ? "postedit" : "eval";
+    const mode = body.mode === "postedit" ? "postedit" : body.mode === "rewrite" ? "rewrite" : "eval";
 
     const genRow = await store.getGeneration(body.generation_id);
     if (!genRow) throw new HttpError(404, "Generation not found");
+
+    if (mode === "rewrite") {
+      const systemPrompt = genRow.system_prompt || "";
+      const productSection = groundingSection(genRow);
+      const originalContent = (typeof body.content === "string" && body.content.trim())
+        ? body.content
+        : (genRow.response_content || "");
+      const prompt = buildRewritePrompt({
+        systemPrompt,
+        productSection,
+        originalContent,
+        feedback: body.feedback,
+      });
+      res.json({ mode, messages: [{ role: "user", content: prompt }] });
+      return;
+    }
 
     if (mode === "postedit") {
       const systemPrompt = genRow.system_prompt || "";

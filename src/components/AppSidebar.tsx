@@ -3,7 +3,6 @@ import { cn } from "@/lib/utils";
 import {
   ListChecks,
   Layers,
-  Play,
   Sparkles,
   GitFork,
   Database,
@@ -14,16 +13,12 @@ import {
 import { useState } from "react";
 import { logout } from "@/lib/auth";
 
-const activeItems = [
+const navItems = [
   { to: "/criteria",    icon: ListChecks, label: "Criteria" },
+  { to: "/suites",      icon: Layers,     label: "Suites" },
   { to: "/generations", icon: Sparkles,   label: "Generations" },
   { to: "/mapping",     icon: GitFork,    label: "Mapping" },
   { to: "/data",        icon: Database,   label: "Data" },
-];
-
-const inactiveItems = [
-  { to: "/suites",   icon: Layers, label: "Suites" },
-  { to: "/evaluate", icon: Play,   label: "Evaluate" },
 ];
 
 function NavItem({ to, icon: Icon, label, collapsed }: {
@@ -74,21 +69,7 @@ export function AppSidebar() {
 
       {/* Primary nav */}
       <nav className="flex-1 px-2 py-3 space-y-1 overflow-y-auto">
-        {activeItems.map((item) => (
-          <NavItem key={item.to} {...item} collapsed={collapsed} />
-        ))}
-
-        {/* Divider + inactive label */}
-        <div className="pt-3 pb-1">
-          <div className="border-t border-sidebar-border" />
-          {!collapsed && (
-            <p className="mt-2 px-3 text-[10px] font-semibold uppercase tracking-widest text-sidebar-foreground/40">
-              Inactive
-            </p>
-          )}
-        </div>
-
-        {inactiveItems.map((item) => (
+        {navItems.map((item) => (
           <NavItem key={item.to} {...item} collapsed={collapsed} />
         ))}
       </nav>

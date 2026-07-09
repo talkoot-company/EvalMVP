@@ -3,13 +3,15 @@
 // Same method surface as store-sqlite.js, but every method is async.
 import sql from "mssql";
 
-const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"] };
-const DATE_COLS = { criteria: ["created_at", "updated_at"], eval_results: ["run_at"] };
+const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"], suites: ["active"] };
+const DATE_COLS = { criteria: ["created_at", "updated_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"] };
 const PK = {
   criteria: ["id"],
   generations: ["generation_id"],
   eval_results: ["id"],
   type_mapping: ["criteria_content_type", "generation_type"],
+  suites: ["id"],
+  suite_criteria: ["suite_id", "criterion_id"],
 };
 
 const GEN_LIST_COLS =
@@ -150,6 +152,28 @@ export async function createMssqlStore({ adonet, database, prefix }) {
   await q(
     `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_${prefix}generations_gen_type')
      CREATE INDEX [idx_${prefix}generations_gen_type] ON [dbo].[${prefix}generations](gen_type);`
+  );
+
+  // Self-provision the suites + suite_criteria (junction) tables. Also created by
+  // db/setup_temp_tables.py, but self-provisioning keeps the app working anywhere.
+  await q(
+    `IF OBJECT_ID(N'[dbo].[${prefix}suites]', N'U') IS NULL
+     CREATE TABLE [dbo].[${prefix}suites] (
+       id           NVARCHAR(200)  NOT NULL PRIMARY KEY,
+       name         NVARCHAR(500)  NOT NULL,
+       description  NVARCHAR(MAX)  NULL,
+       active       BIT            NOT NULL,
+       created_at   DATETIME2(7)   NOT NULL,
+       updated_at   DATETIME2(7)   NOT NULL
+     );`
+  );
+  await q(
+    `IF OBJECT_ID(N'[dbo].[${prefix}suite_criteria]', N'U') IS NULL
+     CREATE TABLE [dbo].[${prefix}suite_criteria] (
+       suite_id     NVARCHAR(200) NOT NULL,
+       criterion_id NVARCHAR(200) NOT NULL,
+       CONSTRAINT [PK_${prefix}suite_criteria] PRIMARY KEY (suite_id, criterion_id)
+     );`
   );
 
   const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}`;
@@ -302,6 +326,26 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     listChainGenerationIds: async (criterionId) =>
       (await q(`SELECT generation_id FROM ${tbl("refinement_chains")} WHERE criterion_id=@p0`, [criterionId]))
         .map((r) => r.generation_id),
+
+    // suites (+ suite_criteria junction; mirrors the type_mapping pattern)
+    listSuites: () => q(`SELECT * FROM ${tbl("suites")} ORDER BY name`),
+    getSuite: (id) => one(`SELECT * FROM ${tbl("suites")} WHERE id=@p0`, [id]),
+    insertSuite: (obj) => insertRow("suites", obj),
+    updateSuite: (id, obj) => updateRow("suites", "id", id, obj),
+    deleteSuite: async (id) => {
+      await q(`DELETE FROM ${tbl("suite_criteria")} WHERE suite_id=@p0`, [id]);
+      await q(`DELETE FROM ${tbl("suites")} WHERE id=@p0`, [id]);
+    },
+    getSuiteCriterionIds: async (suiteId) =>
+      (await q(`SELECT criterion_id FROM ${tbl("suite_criteria")} WHERE suite_id=@p0`, [suiteId]))
+        .map((r) => r.criterion_id),
+    listAllSuiteCriteria: () => q(`SELECT suite_id, criterion_id FROM ${tbl("suite_criteria")}`),
+    addSuiteCriterion: (suiteId, criterionId) =>
+      q(`IF NOT EXISTS (SELECT 1 FROM ${tbl("suite_criteria")} WHERE suite_id=@p0 AND criterion_id=@p1)
+         INSERT INTO ${tbl("suite_criteria")} (suite_id, criterion_id) VALUES (@p0,@p1)`,
+        [suiteId, criterionId]),
+    removeSuiteCriterion: (suiteId, criterionId) =>
+      q(`DELETE FROM ${tbl("suite_criteria")} WHERE suite_id=@p0 AND criterion_id=@p1`, [suiteId, criterionId]),
 
     // generic (export only; import is gated to sqlite at the route)
     allRows: (base) => q(`SELECT * FROM ${tbl(base)}`),

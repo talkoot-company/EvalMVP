@@ -10,6 +10,7 @@ import EvaluatePage from "./pages/EvaluatePage";
 import GenerationsPage from "./pages/GenerationsPage";
 import MappingPage from "./pages/MappingPage";
 import CriterionDetailPage from "./pages/CriterionDetailPage";
+import SuiteDetailPage from "./pages/SuiteDetailPage";
 import DataPage from "./pages/DataPage";
 import LoginPage from "./pages/LoginPage";
 import NotFound from "./pages/NotFound";
@@ -38,6 +39,7 @@ const App = () => (
               <Route path="/" element={<CriteriaPage />} />
               <Route path="/criteria" element={<CriteriaPage />} />
               <Route path="/suites" element={<SuitesPage />} />
+              <Route path="/suites/:id" element={<SuiteDetailPage />} />
               <Route path="/evaluate" element={<EvaluatePage />} />
               <Route path="/generations" element={<GenerationsPage />} />
               <Route path="/mapping" element={<MappingPage />} />

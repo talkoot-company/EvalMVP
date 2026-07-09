@@ -75,6 +75,17 @@ export interface EvalSuite {
   updated_at: string;
 }
 
+// DB-backed suite: a named collection of evaluation criteria.
+export interface Suite {
+  id: string;
+  name: string;
+  description: string | null;
+  active: boolean;
+  criteria_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ProductCopy {
   id: string;
   product_name: string;
