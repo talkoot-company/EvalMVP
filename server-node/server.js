@@ -18,6 +18,7 @@ import {
   heuristicProductFields, aiExtractProductFields, productDataFromFields, formatProductSection,
 } from "./eval-runner.js";
 import { exportZipBuffer, importZipBuffer, KINDS } from "./data-transfer.js";
+import { renderTemplate, defaultTemplate, DEFAULT_PROMPTS } from "./prompt-templates.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -53,6 +54,17 @@ function rowToSuite(row) {
   return d;
 }
 
+// Normalizes a raw prompt-template row (placeholders is JSON text in both
+// backends) and attaches the built-in default template so the UI can offer a
+// "reset to default" that stages into the editor before saving.
+function rowToPromptTemplate(row) {
+  const d = { ...row };
+  d.placeholders = typeof d.placeholders === "string" ? JSON.parse(d.placeholders || "[]") : (d.placeholders || []);
+  const def = DEFAULT_PROMPTS.find((p) => p.id === d.id);
+  d.default_template = def ? def.template : d.template;
+  return d;
+}
+
 function rowToGeneration(row, includeRaw = false) {
   const d = { ...row };
   for (const field of ["req_json", "resp_json"]) {
@@ -80,7 +92,7 @@ const NO_PRODUCT_DATA_WARNING =
 // (heuristic, then optional AI fallback) and persists the result. Returns the
 // productData shape consumed by the eval pipeline plus a warning when no usable
 // product fields are available.
-async function resolveProductDataForGeneration(store, genRow, requestMessages, { allowAi = false, persist = true } = {}) {
+async function resolveProductDataForGeneration(store, genRow, requestMessages, { allowAi = false, persist = true, extractionTemplate } = {}) {
   const warnIfEmpty = (productData) => ({
     productData,
     extractionWarning: productData.hasProductJson ? null : NO_PRODUCT_DATA_WARNING,
@@ -101,7 +113,7 @@ async function resolveProductDataForGeneration(store, genRow, requestMessages, {
   let fields = heuristicProductFields(requestMessages);
   if ((!fields || !Object.keys(fields).length) && allowAi) {
     try {
-      fields = await aiExtractProductFields(requestMessages);
+      fields = await aiExtractProductFields(requestMessages, extractionTemplate);
     } catch (err) {
       console.error(`AI product extraction failed for ${genRow.generation_id}: ${err.message || err}`);
       fields = null;
@@ -150,6 +162,7 @@ const CRITERIA_COLUMNS = [
 ];
 
 const SUITE_COLUMNS = ["name", "description", "active"];
+const PROMPT_TEMPLATE_COLUMNS = ["name", "description", "template"];
 
 const GENERATION_TYPES = ["Title", "Description", "Bullets", "Sustainability", "Extraction", "Other"];
 const CRITERIA_CONTENT_TYPES = ["Title", "Description", "Bullets/Specs", "Meta Description"];
@@ -181,40 +194,29 @@ function groundingSection(genRow) {
 }
 
 // The exact prompt sent to the LLM to rewrite (post-edit) a piece of copy.
-function buildPostEditPrompt({ systemPrompt, productSection, originalContent, criterion_name, score, desired_score, rationale, evidence }) {
+// `template` overrides the stored/edited post_edit template (built-in default otherwise).
+function buildPostEditPrompt({ systemPrompt, productSection, originalContent, criterion_name, score, desired_score, rationale, evidence }, template) {
   let evidenceBlock = "";
   if (Array.isArray(evidence) && evidence.length) {
     evidenceBlock = "\nSpecific passages flagged:\n" +
       evidence.filter(Boolean).map((e) => `  - "${e}"`).join("\n");
   }
-  return `You are an expert product copy editor. Your task is to improve a piece of product copy based on evaluation feedback.
-
---- ORIGINAL TASK ---
-${systemPrompt}
-
---- PRODUCT DATA ---
-${productSection}
-
---- ORIGINAL COPY ---
-${originalContent}
-
---- EVALUATION FEEDBACK ---
-Criterion: ${criterion_name}
-Score: ${score} (target: ${desired_score})
-Feedback: ${rationale}${evidenceBlock}
-
---- INSTRUCTIONS ---
-Rewrite the copy to address the evaluation feedback and achieve the target score.
-- Keep the same format and approximate length as the original.
-- Only change what is needed to address the specific feedback.
-- Do not add commentary or explanations — output only the improved copy.
-`;
+  return renderTemplate(template ?? defaultTemplate("post_edit"), {
+    system_prompt: systemPrompt,
+    product_data: productSection,
+    original_copy: originalContent,
+    criterion_name,
+    score,
+    desired_score,
+    rationale,
+    evidence: evidenceBlock,
+  });
 }
 
 // The exact prompt sent to the LLM to rewrite copy using the AGGREGATED feedback
 // from every criterion the generation was evaluated against. Passing criteria are
 // flagged as strengths to preserve; failing ones as the changes to make.
-function buildRewritePrompt({ systemPrompt, productSection, originalContent, feedback }) {
+function buildRewritePrompt({ systemPrompt, productSection, originalContent, feedback }, template) {
   const items = Array.isArray(feedback) ? feedback : [];
   const feedbackBlocks = items.map((f, i) => {
     const passed = String(f.score) === String(f.desired_score);
@@ -229,26 +231,13 @@ function buildRewritePrompt({ systemPrompt, productSection, originalContent, fee
     return `${i + 1}. ${f.criterion_name} — ${label} (score ${f.score})\n   Feedback: ${f.rationale}${evidenceBlock}`;
   }).join("\n\n");
 
-  return `You are an expert product copy editor. Improve the copy below based on evaluation feedback from multiple criteria.
-
---- ORIGINAL TASK ---
-${systemPrompt}
-
---- PRODUCT DATA ---
-${productSection}
-
---- ORIGINAL COPY ---
-${originalContent}
-
---- EVALUATION FEEDBACK (${items.length} criteri${items.length === 1 ? "on" : "a"}) ---
-${feedbackBlocks}
-
---- INSTRUCTIONS ---
-Rewrite the copy to satisfy every "NEEDS IMPROVEMENT" criterion while preserving the qualities that already "PASS" — do not regress them.
-- Keep the same format and approximate length as the original.
-- Only change what is needed to fix the failing criteria without breaking the passing ones.
-- Do not add commentary or explanations — output only the improved copy.
-`;
+  return renderTemplate(template ?? defaultTemplate("rewrite_aggregate"), {
+    system_prompt: systemPrompt,
+    product_data: productSection,
+    original_copy: originalContent,
+    criteria_count: `${items.length} criteri${items.length === 1 ? "on" : "a"}`,
+    feedback: feedbackBlocks,
+  });
 }
 
 export function createApp({ store, resultsDir, staticDir = null }) {
@@ -259,6 +248,18 @@ export function createApp({ store, resultsDir, staticDir = null }) {
   app.get("/api/health", (req, res) => {
     res.json({ ok: true, backend: store.backend });
   });
+
+  // Load the current (possibly edited) template text for a prompt id. Returns
+  // undefined so the builder falls back to its built-in default if the row is
+  // missing/blank. Templates are seeded on connect, so normally a row exists.
+  const loadTemplate = async (id) => {
+    try {
+      const row = await store.getPromptTemplate(id);
+      return row && row.template ? row.template : undefined;
+    } catch {
+      return undefined;
+    }
+  };
 
   // ----- Criteria routes -----
 
@@ -524,12 +525,12 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     // Resolve grounding product data (stored column → heuristic → AI fallback,
     // persisting the result so future runs and the filter can use it).
     const { productData, extractionWarning } = await resolveProductDataForGeneration(
-      store, genRow, requestMessages, { allowAi: true },
+      store, genRow, requestMessages, { allowAi: true, extractionTemplate: await loadTemplate("product_extraction") },
     );
 
     let result;
     try {
-      result = await runSingleEval(copyText, productData, criterion);
+      result = await runSingleEval(copyText, productData, criterion, await loadTemplate("eval_grading"));
     } catch (err) {
       throw new HttpError(500, `Eval failed: ${err.message || err}`);
     }
@@ -607,12 +608,12 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     const criterion = rowToCriterion(critRow);
 
     const { productData, extractionWarning } = await resolveProductDataForGeneration(
-      store, genRow, requestMessages, { allowAi: true },
+      store, genRow, requestMessages, { allowAi: true, extractionTemplate: await loadTemplate("product_extraction") },
     );
 
     let result;
     try {
-      result = await runSingleEval(content, productData, criterion);
+      result = await runSingleEval(content, productData, criterion, await loadTemplate("eval_grading"));
     } catch (err) {
       throw new HttpError(500, `Re-grade failed: ${err.message || err}`);
     }
@@ -702,7 +703,7 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       desired_score: body.desired_score,
       rationale: body.rationale,
       evidence: body.evidence,
-    });
+    }, await loadTemplate("post_edit"));
 
     let improved;
     try {
@@ -736,7 +737,7 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       productSection,
       originalContent,
       feedback: body.feedback,
-    });
+    }, await loadTemplate("rewrite_aggregate"));
 
     let improved;
     try {
@@ -772,7 +773,7 @@ export function createApp({ store, resultsDir, staticDir = null }) {
         productSection,
         originalContent,
         feedback: body.feedback,
-      });
+      }, await loadTemplate("rewrite_aggregate"));
       res.json({ mode, messages: [{ role: "user", content: prompt }] });
       return;
     }
@@ -792,7 +793,7 @@ export function createApp({ store, resultsDir, staticDir = null }) {
         desired_score: body.desired_score,
         rationale: body.rationale,
         evidence: body.evidence,
-      });
+      }, await loadTemplate("post_edit"));
       res.json({ mode, messages: [{ role: "user", content: prompt }] });
       return;
     }
@@ -830,7 +831,53 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       store, genRow, requestMessages, { allowAi: false, persist: false },
     );
 
-    res.json({ mode, messages: buildEvalMessages(content, productData, criterion) });
+    res.json({ mode, messages: buildEvalMessages(content, productData, criterion, await loadTemplate("eval_grading")) });
+  }));
+
+  // ----- Prompt template routes (editable eval / rewrite / extraction prompts) -----
+
+  app.get("/api/prompts", route(async (req, res) => {
+    const rows = await store.listPromptTemplates();
+    res.json(rows.map(rowToPromptTemplate));
+  }));
+
+  app.get("/api/prompts/:id", route(async (req, res) => {
+    const row = await store.getPromptTemplate(req.params.id);
+    if (!row) throw new HttpError(404, "Prompt template not found");
+    res.json(rowToPromptTemplate(row));
+  }));
+
+  app.put("/api/prompts/:id", route(async (req, res) => {
+    const existing = await store.getPromptTemplate(req.params.id);
+    if (!existing) throw new HttpError(404, "Prompt template not found");
+    const body = req.body || {};
+    const merged = { ...rowToPromptTemplate(existing) };
+    for (const col of PROMPT_TEMPLATE_COLUMNS) { if (col in body) merged[col] = body[col]; }
+    // Lenient: never rejects for missing placeholders — the UI warns instead.
+    await store.updatePromptTemplate(req.params.id, {
+      name: merged.name,
+      description: merged.description ?? null,
+      template: merged.template ?? "",
+      updated_at: nowIso(),
+    });
+    res.json(rowToPromptTemplate(await store.getPromptTemplate(req.params.id)));
+  }));
+
+  // Reset a prompt back to its built-in default (from DEFAULT_PROMPTS).
+  app.post("/api/prompts/:id/reset", route(async (req, res) => {
+    const existing = await store.getPromptTemplate(req.params.id);
+    if (!existing) throw new HttpError(404, "Prompt template not found");
+    const def = DEFAULT_PROMPTS.find((p) => p.id === req.params.id);
+    if (!def) throw new HttpError(404, `No built-in default for '${req.params.id}'`);
+    await store.updatePromptTemplate(req.params.id, {
+      name: def.name,
+      description: def.description ?? null,
+      category: def.category ?? null,
+      template: def.template,
+      placeholders: JSON.stringify(def.placeholders ?? []),
+      updated_at: nowIso(),
+    });
+    res.json(rowToPromptTemplate(await store.getPromptTemplate(req.params.id)));
   }));
 
   // ----- Data import/export -----

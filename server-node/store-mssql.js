@@ -2,9 +2,10 @@
 // Reads/writes the prefixed temp tables (default temp_Brian_*) in dev-golfcarts.
 // Same method surface as store-sqlite.js, but every method is async.
 import sql from "mssql";
+import { DEFAULT_PROMPTS } from "./prompt-templates.js";
 
 const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"], suites: ["active"] };
-const DATE_COLS = { criteria: ["created_at", "updated_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"] };
+const DATE_COLS = { criteria: ["created_at", "updated_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"], prompt_templates: ["created_at", "updated_at"] };
 const PK = {
   criteria: ["id"],
   generations: ["generation_id"],
@@ -12,6 +13,7 @@ const PK = {
   type_mapping: ["criteria_content_type", "generation_type"],
   suites: ["id"],
   suite_criteria: ["suite_id", "criterion_id"],
+  prompt_templates: ["id"],
 };
 
 const GEN_LIST_COLS =
@@ -175,6 +177,19 @@ export async function createMssqlStore({ adonet, database, prefix }) {
        CONSTRAINT [PK_${prefix}suite_criteria] PRIMARY KEY (suite_id, criterion_id)
      );`
   );
+  await q(
+    `IF OBJECT_ID(N'[dbo].[${prefix}prompt_templates]', N'U') IS NULL
+     CREATE TABLE [dbo].[${prefix}prompt_templates] (
+       id           NVARCHAR(200)  NOT NULL PRIMARY KEY,
+       name         NVARCHAR(500)  NOT NULL,
+       description  NVARCHAR(MAX)  NULL,
+       category     NVARCHAR(200)  NULL,
+       template     NVARCHAR(MAX)  NOT NULL,
+       placeholders NVARCHAR(MAX)  NULL,
+       created_at   DATETIME2(7)   NOT NULL,
+       updated_at   DATETIME2(7)   NOT NULL
+     );`
+  );
 
   const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}`;
 
@@ -192,6 +207,20 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     await q(`UPDATE ${tbl(base)} SET ${set} WHERE [${pkCol}]=@p${cols.length}`,
       [...cols.map((c) => o[c]), pkVal]);
   };
+
+  // Seed any default prompt template not present yet (self-heals; never
+  // overwrites an edited row). mssql has no other seed-on-connect pattern.
+  for (const p of DEFAULT_PROMPTS) {
+    const existing = await one(`SELECT 1 AS n FROM ${tbl("prompt_templates")} WHERE id=@p0`, [p.id]);
+    if (!existing) {
+      const now = new Date().toISOString();
+      await insertRow("prompt_templates", {
+        id: p.id, name: p.name, description: p.description ?? null, category: p.category ?? null,
+        template: p.template, placeholders: JSON.stringify(p.placeholders ?? []),
+        created_at: now, updated_at: now,
+      });
+    }
+  }
 
   return {
     backend: "mssql",
@@ -346,6 +375,11 @@ export async function createMssqlStore({ adonet, database, prefix }) {
         [suiteId, criterionId]),
     removeSuiteCriterion: (suiteId, criterionId) =>
       q(`DELETE FROM ${tbl("suite_criteria")} WHERE suite_id=@p0 AND criterion_id=@p1`, [suiteId, criterionId]),
+
+    // prompt templates
+    listPromptTemplates: () => q(`SELECT * FROM ${tbl("prompt_templates")} ORDER BY category, name`),
+    getPromptTemplate: (id) => one(`SELECT * FROM ${tbl("prompt_templates")} WHERE id=@p0`, [id]),
+    updatePromptTemplate: (id, obj) => updateRow("prompt_templates", "id", id, obj),
 
     // generic (export only; import is gated to sqlite at the route)
     allRows: (base) => q(`SELECT * FROM ${tbl(base)}`),

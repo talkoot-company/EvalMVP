@@ -4,6 +4,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import Database from "better-sqlite3";
+import { DEFAULT_PROMPTS } from "./prompt-templates.js";
 
 const BASE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS criteria (
@@ -80,6 +81,16 @@ const BASE_SCHEMA = `
     criterion_id TEXT NOT NULL,
     PRIMARY KEY (suite_id, criterion_id)
   );
+  CREATE TABLE IF NOT EXISTS prompt_templates (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    description  TEXT,
+    category     TEXT,
+    template     TEXT NOT NULL,
+    placeholders TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+  );
   CREATE INDEX IF NOT EXISTS idx_generations_created_at ON generations (created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_generations_model ON generations (model);
   CREATE INDEX IF NOT EXISTS idx_refinement_criterion ON refinement_chains (criterion_id);
@@ -88,7 +99,7 @@ const BASE_SCHEMA = `
 const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}`;
 
 const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"], suites: ["active"] };
-const DATE_COLS = { criteria: ["created_at", "updated_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"] };
+const DATE_COLS = { criteria: ["created_at", "updated_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"], prompt_templates: ["created_at", "updated_at"] };
 
 // Generation-type classification (must mirror inferType in the frontend and the
 // mssql store). Used for the by-type counts AND server-side type filtering.
@@ -176,6 +187,20 @@ export function createSqliteStore(dbPath) {
     db.prepare(`UPDATE ${base} SET ${cols.map((c) => `${c}=?`).join(",")} WHERE ${pkCol}=?`)
       .run(...cols.map((c) => o[c]), pkVal);
   };
+
+  // Seed any default prompt template that isn't present yet (self-heals when new
+  // defaults are added; never overwrites an edited row).
+  const getPromptExists = db.prepare("SELECT 1 FROM prompt_templates WHERE id=?");
+  for (const p of DEFAULT_PROMPTS) {
+    if (!getPromptExists.get(p.id)) {
+      const now = new Date().toISOString();
+      insertRow("prompt_templates", {
+        id: p.id, name: p.name, description: p.description ?? null, category: p.category ?? null,
+        template: p.template, placeholders: JSON.stringify(p.placeholders ?? []),
+        created_at: now, updated_at: now,
+      });
+    }
+  }
 
   return {
     backend: "sqlite",
@@ -298,6 +323,11 @@ export function createSqliteStore(dbPath) {
       db.prepare("INSERT OR IGNORE INTO suite_criteria (suite_id, criterion_id) VALUES (?,?)").run(suiteId, criterionId),
     removeSuiteCriterion: (suiteId, criterionId) =>
       db.prepare("DELETE FROM suite_criteria WHERE suite_id=? AND criterion_id=?").run(suiteId, criterionId),
+
+    // prompt templates
+    listPromptTemplates: () => db.prepare("SELECT * FROM prompt_templates ORDER BY category, name").all(),
+    getPromptTemplate: (id) => db.prepare("SELECT * FROM prompt_templates WHERE id=?").get(id) || null,
+    updatePromptTemplate: (id, obj) => updateRow("prompt_templates", "id", id, obj),
 
     // generic (data import/export)
     allRows: (base) => db.prepare(`SELECT * FROM ${base}`).all(),
