@@ -14,9 +14,11 @@ import { FilterDropdown } from "@/components/CriteriaFilterBar";
 import { ChatChainModal } from "@/components/ChatChainModal";
 import { RewriteDialog, type RewriteIteration } from "@/components/RewriteDialog";
 import { cn } from "@/lib/utils";
+import { downloadJson } from "@/lib/download";
+import { toast } from "sonner";
 import {
   ChevronUp, ChevronLeft, ChevronRight, X, Play, Loader2,
-  Search, AlertTriangle, Plus, Sparkles, MessageSquare,
+  Search, AlertTriangle, Plus, Sparkles, MessageSquare, Download,
 } from "lucide-react";
 
 const PAGE_SIZE = 10;
@@ -563,16 +565,44 @@ export function SuiteTestPanel({
                         </ul>
                       )}
                       {cell.extraction_warning && <p className="text-[11px] text-amber-700">{cell.extraction_warning}</p>}
-                      <Button
-                        size="sm" variant="ghost"
-                        className="h-6 px-1.5 text-[11px] gap-1 text-muted-foreground hover:text-foreground"
-                        onClick={() => setChatRequest({
-                          request: { generation_id: genId, mode: "eval", criterion_id: critId },
-                          title: `Eval prompt · ${genId.slice(0, 8)}`,
-                        })}
-                      >
-                        <MessageSquare className="h-3 w-3" /> View eval prompt
-                      </Button>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          size="sm" variant="ghost"
+                          className="h-6 px-1.5 text-[11px] gap-1 text-muted-foreground hover:text-foreground"
+                          onClick={() => setChatRequest({
+                            request: { generation_id: genId, mode: "eval", criterion_id: critId },
+                            title: `Eval prompt · ${genId.slice(0, 8)}`,
+                          })}
+                        >
+                          <MessageSquare className="h-3 w-3" /> View eval prompt
+                        </Button>
+                        <Button
+                          size="sm" variant="ghost"
+                          className="h-6 px-1.5 text-[11px] gap-1 text-muted-foreground hover:text-foreground"
+                          onClick={() => {
+                            const critName = cell.criterion_name ?? crit?.criteria_name ?? critId;
+                            toast.promise(
+                              evalsApi.messages({ generation_id: genId, mode: "eval", criterion_id: critId }).then((r) => {
+                                downloadJson(`eval-${genId.slice(0, 8)}-${critId}`, {
+                                  kind: "evaluation",
+                                  exported_at: new Date().toISOString(),
+                                  generation_id: genId,
+                                  model: g?.model ?? null,
+                                  criterion: { id: critId, name: critName },
+                                  result: {
+                                    score: cell.score, desired_score: cell.desired_score,
+                                    rationale: cell.rationale, evidence: cell.evidence,
+                                  },
+                                  chat: r.messages,
+                                });
+                              }),
+                              { loading: "Preparing download…", success: "Downloaded eval JSON", error: (e) => `Download failed: ${e instanceof Error ? e.message : String(e)}` },
+                            );
+                          }}
+                        >
+                          <Download className="h-3 w-3" /> Download JSON
+                        </Button>
+                      </div>
                     </>
                   )}
                 </div>

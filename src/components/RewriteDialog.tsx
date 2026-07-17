@@ -5,7 +5,9 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 import { ScoreBadge } from "@/components/ScoreBadge";
-import { Loader2, Sparkles, MessageSquare, ChevronDown, ChevronRight } from "lucide-react";
+import { downloadJson } from "@/lib/download";
+import { toast } from "sonner";
+import { Loader2, Sparkles, MessageSquare, ChevronDown, ChevronRight, Download } from "lucide-react";
 
 // One link in a rewrite chain: the rewritten copy plus its re-grade against
 // every selected criterion. `grades` are RewriteFeedbackItems so the next
@@ -114,6 +116,39 @@ export function RewriteDialog({
     }
   }
 
+  // Export the whole rewrite chain as JSON, including the exact rewrite prompt
+  // (chat chain) that produced each link and its re-grade scores.
+  function downloadChain() {
+    // The feedback + base copy that drove each link (link 0 uses the baseline).
+    const promptFor = (i: number) => evalsApi.messages({
+      generation_id: generationId,
+      mode: "rewrite",
+      feedback: i === 0 ? baseFeedback : chain[i - 1].grades,
+      content: i === 0 ? undefined : chain[i - 1].content,
+    }).then((r) => r.messages);
+
+    toast.promise(
+      Promise.all(chain.map((_, i) => promptFor(i))).then((prompts) => {
+        downloadJson(`rewrite-chain-${generationId.slice(0, 8)}`, {
+          kind: "rewrite_chain",
+          exported_at: new Date().toISOString(),
+          generation_id: generationId,
+          model: model ?? null,
+          original_copy: originalCopy,
+          baseline_grades: baseFeedback,
+          iterations: chain.map((it, i) => ({
+            index: i + 1,
+            rewrite_prompt: prompts[i],
+            content: it.content,
+            created_at: it.created_at,
+            grades: it.grades,
+          })),
+        });
+      }),
+      { loading: "Preparing download…", success: "Downloaded rewrite chain JSON", error: (e) => `Download failed: ${e instanceof Error ? e.message : String(e)}` },
+    );
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col gap-3">
@@ -205,6 +240,14 @@ export function RewriteDialog({
             onClick={() => onViewPrompt(nextFeedback, nextBaseContent, `Next rewrite prompt · #${chain.length + 1}`)}
           >
             <MessageSquare className="h-3.5 w-3.5" /> View next prompt
+          </Button>
+          <Button
+            size="sm" variant="outline" className="gap-1.5"
+            disabled={chain.length === 0}
+            onClick={downloadChain}
+            title="Download the full rewrite chain (chat + scores) as JSON"
+          >
+            <Download className="h-3.5 w-3.5" /> Download chain
           </Button>
         </div>
       </DialogContent>

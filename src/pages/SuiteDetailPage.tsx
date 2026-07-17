@@ -12,14 +12,18 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { InlineEdit } from "@/components/InlineEdit";
 import { CriteriaFilterBar } from "@/components/CriteriaFilterBar";
 import { SuiteTestPanel } from "@/components/SuiteTestPanel";
-import { ArrowLeft, Loader2, Eye, EyeOff, ChevronUp, X, Plus } from "lucide-react";
+import { ArrowLeft, Loader2, Eye, EyeOff, ChevronUp, X, Plus, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { downloadJson } from "@/lib/download";
 import { toast } from "sonner";
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
     <div className="space-y-2">
-      <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">{title}</p>
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">{title}</p>
+        {action}
+      </div>
       {children}
     </div>
   );
@@ -120,6 +124,23 @@ export default function SuiteDetailPage() {
   const selected = useMemo(() => criteria.filter((c) => associated.has(c.id)), [criteria, associated]);
   const [showSelector, setShowSelector] = useState(false);
 
+  // Export the suite's associated criteria as JSON (full criterion objects).
+  function exportCriteria() {
+    if (!suite) return;
+    downloadJson(`suite-${suite.id}-criteria`, {
+      kind: "suite_criteria",
+      exported_at: new Date().toISOString(),
+      suite: {
+        id: suite.id,
+        name: suite.name,
+        description: suite.description,
+        active: suite.active,
+        criteria_ids: suite.criteria_ids,
+      },
+      criteria: selected,
+    });
+  }
+
   if (isLoading) {
     return <div className="p-6 flex items-center justify-center h-64 text-muted-foreground text-sm">Loading…</div>;
   }
@@ -186,7 +207,19 @@ export default function SuiteDetailPage() {
       </Section>
 
       {/* Associated criteria */}
-      <Section title={`Associated criteria (${associated.size} selected)`}>
+      <Section
+        title={`Associated criteria (${associated.size} selected)`}
+        action={
+          <Button
+            variant="outline" size="sm" className="h-7 gap-1.5 text-xs"
+            onClick={exportCriteria}
+            disabled={selected.length === 0}
+            title="Download the suite's criteria as JSON"
+          >
+            <Download className="h-3.5 w-3.5" /> Export JSON
+          </Button>
+        }
+      >
         {/* Selected criteria — always visible */}
         <div className="border rounded-md divide-y">
           {selected.length === 0 ? (
