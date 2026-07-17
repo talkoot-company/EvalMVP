@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from "rea
 import { AppLayout } from "@/components/AppLayout";
 import CriteriaPage from "./pages/CriteriaPage";
 import SuitesPage from "./pages/SuitesPage";
+import PromptsPage from "./pages/PromptsPage";
 import EvaluatePage from "./pages/EvaluatePage";
 import GenerationsPage from "./pages/GenerationsPage";
 import MappingPage from "./pages/MappingPage";
@@ -40,6 +41,7 @@ const App = () => (
               <Route path="/criteria" element={<CriteriaPage />} />
               <Route path="/suites" element={<SuitesPage />} />
               <Route path="/suites/:id" element={<SuiteDetailPage />} />
+              <Route path="/prompts" element={<PromptsPage />} />
               <Route path="/evaluate" element={<EvaluatePage />} />
               <Route path="/generations" element={<GenerationsPage />} />
               <Route path="/mapping" element={<MappingPage />} />

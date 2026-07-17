@@ -75,6 +75,27 @@ export interface EvalSuite {
   updated_at: string;
 }
 
+// One {token} interpolated into a prompt template.
+export interface PromptPlaceholder {
+  token: string;
+  description: string;
+  required: boolean;
+}
+
+// DB-backed, editable AI prompt template (eval grading, rewrite, extraction).
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  description: string | null;
+  category: string;
+  template: string;
+  placeholders: PromptPlaceholder[];
+  // The built-in default template (for "reset to default"); server-provided.
+  default_template: string;
+  created_at: string;
+  updated_at: string;
+}
+
 // DB-backed suite: a named collection of evaluation criteria.
 export interface Suite {
   id: string;

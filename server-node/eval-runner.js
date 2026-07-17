@@ -1,5 +1,6 @@
 // Port of server/eval_runner.py — single-criterion eval via Azure OpenAI.
 import { AzureOpenAI } from "openai";
+import { renderTemplate, defaultTemplate } from "./prompt-templates.js";
 
 // Credentials come from .env.local (gitignored). See README note in index.js.
 function makeClient() {
@@ -120,17 +121,10 @@ export function heuristicProductFields(requestMessages) {
 // TIER 2 (AI, costs an LLM call): extract product attributes regardless of the
 // key names used. Returns a flat object, or {} when the content has no concrete
 // product data (only generic writing/voice instructions). Throws on API error.
-export async function aiExtractProductFields(requestMessages) {
+export async function aiExtractProductFields(requestMessages, template) {
   const content = userMessages(requestMessages).join("\n\n---\n\n").trim();
   if (!content) return {};
-  const prompt = `You are a data-extraction tool. From the content below, extract ALL concrete product information into a single flat JSON object. Use the original field labels where present (e.g. "Title", "Brand Name", "Description", "Keywords", "Ingredients", "Flavor", "Pack Size"). Include every product attribute you can find.
-
-If the content contains NO concrete product data — for example only generic writing instructions, brand-voice/tone guidance, or image descriptions — return exactly {} (an empty object).
-
-Return ONLY the JSON object, no commentary.
-
-CONTENT:
-${content}`;
+  const prompt = renderTemplate(template ?? defaultTemplate("product_extraction"), { content });
   const response = await aiClient().chat.completions.create({
     model: llmModel(),
     messages: [{ role: "user", content: prompt }],
@@ -262,46 +256,31 @@ export function formatProductSection(productData) {
   return "(No product data available.)";
 }
 
-export function buildEvalPrompt(criterion, copyText, productData) {
-  const name = criterion.criteria_name || "Unknown";
-  const description = criterion.criteria_definition || "";
+export function buildEvalPrompt(criterion, copyText, productData, template) {
   const criteriaType = criterion.criteria_type || "numerical-scale";
   const evalDefinition = criterion.eval_definition || {};
-
-  const rubric = buildRubricText(criteriaType, evalDefinition);
-  const productSection = formatProductSection(productData);
 
   let scoreInstruction;
   if (criteriaType === "yes-no") scoreInstruction = 'score: "Yes" or "No"';
   else if (criteriaType === "numerical-scale") scoreInstruction = "score: a number from 1 to 4";
   else scoreInstruction = "score: the count bucket (e.g. 0, 1, 2, 3+)";
 
-  return `You are an expert evaluator of ecommerce product copy. Evaluate the copy below against the provided criterion and return a JSON object.
-
-CRITERION: ${name}
-DESCRIPTION: ${description}
-
-${rubric}
-
-PRODUCT DATA:
-${productSection}
-
-COPY TO EVALUATE:
-${copyText}
-
-Return ONLY a JSON object with these exact fields:
-- "score": ${scoreInstruction}
-- "rationale": 1-3 sentences explaining the score with reference to the rubric
-- "evidence": a list of 1-3 short quoted phrases from the copy that support your score
-
-Example: {"score": 3, "rationale": "The copy speaks directly to the reader.", "evidence": ["Fuel your moments", "feel good about your choice"]}`;
+  return renderTemplate(template ?? defaultTemplate("eval_grading"), {
+    criterion_name: criterion.criteria_name || "Unknown",
+    criterion_description: criterion.criteria_definition || "",
+    rubric: buildRubricText(criteriaType, evalDefinition),
+    product_data: formatProductSection(productData),
+    copy: copyText,
+    score_instruction: scoreInstruction,
+  });
 }
 
 // The exact chat chain sent to the LLM to grade `copyText`. `productData` is the
 // resolved product record (from the stored column, heuristic, or AI) embedded in
-// the prompt. Used by the eval and to preview the chain without calling the model.
-export function buildEvalMessages(copyText, productData, criterion) {
-  const prompt = buildEvalPrompt(criterion, copyText, productData);
+// the prompt. `template` overrides the stored/edited eval-grading template (falls
+// back to the built-in default). Used by the eval and to preview the chain.
+export function buildEvalMessages(copyText, productData, criterion, template) {
+  const prompt = buildEvalPrompt(criterion, copyText, productData, template);
   return [{ role: "user", content: prompt }];
 }
 
@@ -309,11 +288,11 @@ export function buildEvalMessages(copyText, productData, criterion) {
 // Main eval entry point
 // ---------------------------------------------------------------------------
 
-export async function runSingleEval(copyText, productData, criterion) {
+export async function runSingleEval(copyText, productData, criterion, template) {
   const criteriaType = criterion.criteria_type || "numerical-scale";
   const evalDefinition = criterion.eval_definition || {};
 
-  const messages = buildEvalMessages(copyText, productData, criterion);
+  const messages = buildEvalMessages(copyText, productData, criterion, template);
   const result = await callLlm(messages);
 
   let score = "", rationale = "", evidence = [];
