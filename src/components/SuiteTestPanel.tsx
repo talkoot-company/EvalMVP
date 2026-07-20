@@ -13,12 +13,13 @@ import { ScoreBadge } from "@/components/ScoreBadge";
 import { FilterDropdown } from "@/components/CriteriaFilterBar";
 import { ChatChainModal } from "@/components/ChatChainModal";
 import { RewriteDialog, type RewriteIteration } from "@/components/RewriteDialog";
+import { GenerationOutputModal } from "@/components/GenerationOutputModal";
 import { cn } from "@/lib/utils";
 import { downloadJson } from "@/lib/download";
 import { toast } from "sonner";
 import {
   ChevronUp, ChevronLeft, ChevronRight, X, Play, Loader2,
-  Search, AlertTriangle, Plus, Sparkles, MessageSquare, Download,
+  Search, AlertTriangle, Plus, Sparkles, MessageSquare, Download, History,
 } from "lucide-react";
 
 const PAGE_SIZE = 10;
@@ -119,6 +120,8 @@ export function SuiteTestPanel({
   // rewrite + prompt-inspection state
   const [rewrites, setRewrites] = useState<Record<string, RewriteIteration[]>>(() => loadRewrites(suiteId));
   const [rewriteFor, setRewriteFor] = useState<string | null>(null);
+  const [rewriteAutoStart, setRewriteAutoStart] = useState(false);
+  const [viewGenFor, setViewGenFor] = useState<string | null>(null);
   const [chatRequest, setChatRequest] = useState<{ request: ChatMessagesRequest; title: string } | null>(null);
 
   // --- gen-type inference + explicit filter --------------------------------
@@ -478,23 +481,28 @@ export function SuiteTestPanel({
                   return (
                     <tr key={genId} className="border-b last:border-b-0">
                       <td className="px-3 py-2 align-top sticky left-0 bg-background z-10">
-                        <span className="flex items-center gap-1.5">
-                          <span className="font-mono text-xs">{genId.slice(0, 8)}</span>
-                          {rewrites[genId]?.length > 0 && (
-                            <span className="text-[10px] text-green-600 font-medium" title="Has a rewrite chain">
-                              ↻{rewrites[genId].length}
-                            </span>
-                          )}
-                        </span>
+                        <span className="font-mono text-xs">{genId.slice(0, 8)}</span>
                         {g?.model && <span className="block text-[10px] text-muted-foreground">{g.model}</span>}
-                        <Button
-                          size="sm" variant="ghost"
-                          className="h-6 mt-1 px-1.5 text-[11px] gap-1 text-muted-foreground hover:text-foreground"
-                          disabled={doneCountFor(genId) === 0}
-                          onClick={() => setRewriteFor(genId)}
-                        >
-                          <Sparkles className="h-3 w-3" /> {rewrites[genId]?.length ? "View chain" : "Rewrite"}
-                        </Button>
+                        <div className="mt-1.5 flex flex-col items-start gap-1">
+                          <Button
+                            size="sm"
+                            className="h-7 px-2.5 text-xs gap-1.5"
+                            // Distinct color once a rewrite chain exists (inline style
+                            // reliably overrides the default variant's background).
+                            style={rewrites[genId]?.length ? { backgroundColor: "#16a34a", color: "#fff" } : undefined}
+                            disabled={doneCountFor(genId) === 0}
+                            onClick={() => { setRewriteAutoStart(false); setRewriteFor(genId); }}
+                          >
+                            <Sparkles className="h-3.5 w-3.5" /> Rewrite
+                          </Button>
+                          <Button
+                            size="sm" variant="outline"
+                            className="h-7 px-2.5 text-xs gap-1.5"
+                            onClick={() => setViewGenFor(genId)}
+                          >
+                            <History className="h-3.5 w-3.5" /> View revisions
+                          </Button>
+                        </div>
                       </td>
                       {ranCriteria.map((c) => {
                         const cell = results.get(cellKey(genId, c.id));
@@ -616,17 +624,37 @@ export function SuiteTestPanel({
       {rewriteFor && (
         <RewriteDialog
           open={!!rewriteFor}
-          onOpenChange={(v) => { if (!v) setRewriteFor(null); }}
+          onOpenChange={(v) => { if (!v) { setRewriteFor(null); setRewriteAutoStart(false); } }}
           generationId={rewriteFor}
           model={genCache.get(rewriteFor)?.model}
           originalCopy={genCache.get(rewriteFor)?.response_content ?? ""}
           baseFeedback={feedbackForGeneration(rewriteFor)}
           chain={rewrites[rewriteFor] ?? []}
+          autoStart={rewriteAutoStart}
           onChainChange={(iterations) => persistChain(rewriteFor, iterations)}
           onViewPrompt={(feedback, content, title) => setChatRequest({
             request: { generation_id: rewriteFor, mode: "rewrite", feedback, content },
             title,
           })}
+        />
+      )}
+
+      {/* original (+ latest rewritten) generation output */}
+      {viewGenFor && (
+        <GenerationOutputModal
+          open={!!viewGenFor}
+          onOpenChange={(v) => { if (!v) setViewGenFor(null); }}
+          generationId={viewGenFor}
+          model={genCache.get(viewGenFor)?.model}
+          original={genCache.get(viewGenFor)?.response_content ?? ""}
+          rewritten={rewrites[viewGenFor]?.at(-1)?.content}
+          rewriteIndex={rewrites[viewGenFor]?.length}
+          onRewrite={doneCountFor(viewGenFor) === 0 ? undefined : () => {
+            const genId = viewGenFor;
+            setViewGenFor(null);
+            setRewriteAutoStart(true);
+            setRewriteFor(genId);
+          }}
         />
       )}
 

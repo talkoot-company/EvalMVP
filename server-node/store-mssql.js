@@ -5,7 +5,7 @@ import sql from "mssql";
 import { DEFAULT_PROMPTS } from "./prompt-templates.js";
 
 const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"], suites: ["active"] };
-const DATE_COLS = { criteria: ["created_at", "updated_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"], prompt_templates: ["created_at", "updated_at"] };
+const DATE_COLS = { criteria: ["created_at", "updated_at", "uploaded_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"], prompt_templates: ["created_at", "updated_at"], criteria_uploads: ["uploaded_at"] };
 const PK = {
   criteria: ["id"],
   generations: ["generation_id"],
@@ -14,6 +14,7 @@ const PK = {
   suites: ["id"],
   suite_criteria: ["suite_id", "criterion_id"],
   prompt_templates: ["id"],
+  criteria_uploads: ["id"],
 };
 
 const GEN_LIST_COLS =
@@ -151,6 +152,15 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     `IF COL_LENGTH(N'[dbo].[${prefix}generations]', N'gen_type') IS NULL
      ALTER TABLE [dbo].[${prefix}generations] ADD gen_type NVARCHAR(20) NULL;`
   );
+  // Provenance columns for bulk-uploaded criteria.
+  await q(
+    `IF COL_LENGTH(N'[dbo].[${prefix}criteria]', N'upload_source') IS NULL
+     ALTER TABLE [dbo].[${prefix}criteria] ADD upload_source NVARCHAR(500) NULL;`
+  );
+  await q(
+    `IF COL_LENGTH(N'[dbo].[${prefix}criteria]', N'uploaded_at') IS NULL
+     ALTER TABLE [dbo].[${prefix}criteria] ADD uploaded_at DATETIME2(7) NULL;`
+  );
   await q(
     `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_${prefix}generations_gen_type')
      CREATE INDEX [idx_${prefix}generations_gen_type] ON [dbo].[${prefix}generations](gen_type);`
@@ -188,6 +198,20 @@ export async function createMssqlStore({ adonet, database, prefix }) {
        placeholders NVARCHAR(MAX)  NULL,
        created_at   DATETIME2(7)   NOT NULL,
        updated_at   DATETIME2(7)   NOT NULL
+     );`
+  );
+  await q(
+    `IF OBJECT_ID(N'[dbo].[${prefix}criteria_uploads]', N'U') IS NULL
+     CREATE TABLE [dbo].[${prefix}criteria_uploads] (
+       id             NVARCHAR(200) NOT NULL PRIMARY KEY,
+       filename       NVARCHAR(500) NULL,
+       source         NVARCHAR(500) NULL,
+       uploaded_at    DATETIME2(7)  NOT NULL,
+       criteria_count INT           NULL,
+       created_count  INT           NULL,
+       updated_count  INT           NULL,
+       criterion_ids  NVARCHAR(MAX) NULL,
+       raw_json       NVARCHAR(MAX) NOT NULL
      );`
   );
 
@@ -380,6 +404,12 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     listPromptTemplates: () => q(`SELECT * FROM ${tbl("prompt_templates")} ORDER BY category, name`),
     getPromptTemplate: (id) => one(`SELECT * FROM ${tbl("prompt_templates")} WHERE id=@p0`, [id]),
     updatePromptTemplate: (id, obj) => updateRow("prompt_templates", "id", id, obj),
+
+    // criteria upload audit log (raw JSON kept for traceability)
+    insertCriteriaUpload: (obj) => insertRow("criteria_uploads", obj),
+    listCriteriaUploads: () =>
+      q(`SELECT id, filename, source, uploaded_at, criteria_count, created_count, updated_count, criterion_ids
+         FROM ${tbl("criteria_uploads")} ORDER BY uploaded_at DESC`),
 
     // generic (export only; import is gated to sqlite at the route)
     allRows: (base) => q(`SELECT * FROM ${tbl(base)}`),

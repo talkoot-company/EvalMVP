@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { evalsApi, type RewriteFeedbackItem } from "@/api/evals";
 import { Button } from "@/components/ui/button";
 import {
@@ -62,6 +62,7 @@ export function RewriteDialog({
   chain,
   onChainChange,
   onViewPrompt,
+  autoStart = false,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -72,6 +73,7 @@ export function RewriteDialog({
   chain: RewriteIteration[];
   onChainChange: (iterations: RewriteIteration[]) => void;
   onViewPrompt: (feedback: RewriteFeedbackItem[], content: string | undefined, title: string) => void;
+  autoStart?: boolean;
 }) {
   const [status, setStatus] = useState<"idle" | "running" | "error">("idle");
   const [stage, setStage] = useState<"rewriting" | "regrading" | null>(null);
@@ -115,6 +117,13 @@ export function RewriteDialog({
       setStage(null);
     }
   }
+
+  // When opened via "Run rewrite" from the output modal, kick off the first
+  // rewrite automatically (once, on open, only if there's no chain yet).
+  useEffect(() => {
+    if (autoStart && chain.length === 0 && status === "idle") generate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire once on open
+  }, []);
 
   // Export the whole rewrite chain as JSON, including the exact rewrite prompt
   // (chat chain) that produced each link and its re-grade scores.
