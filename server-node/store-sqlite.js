@@ -91,6 +91,17 @@ const BASE_SCHEMA = `
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS criteria_uploads (
+    id             TEXT PRIMARY KEY,
+    filename       TEXT,
+    source         TEXT,
+    uploaded_at    TEXT NOT NULL,
+    criteria_count INTEGER,
+    created_count  INTEGER,
+    updated_count  INTEGER,
+    criterion_ids  TEXT,
+    raw_json       TEXT NOT NULL
+  );
   CREATE INDEX IF NOT EXISTS idx_generations_created_at ON generations (created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_generations_model ON generations (model);
   CREATE INDEX IF NOT EXISTS idx_refinement_criterion ON refinement_chains (criterion_id);
@@ -99,7 +110,7 @@ const BASE_SCHEMA = `
 const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}`;
 
 const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"], suites: ["active"] };
-const DATE_COLS = { criteria: ["created_at", "updated_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"], prompt_templates: ["created_at", "updated_at"] };
+const DATE_COLS = { criteria: ["created_at", "updated_at", "uploaded_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"], prompt_templates: ["created_at", "updated_at"], criteria_uploads: ["uploaded_at"] };
 
 // Generation-type classification (must mirror inferType in the frontend and the
 // mssql store). Used for the by-type counts AND server-side type filtering.
@@ -163,6 +174,16 @@ export function createSqliteStore(dbPath) {
   }
   try {
     db.exec("ALTER TABLE generations ADD COLUMN gen_type TEXT");
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec("ALTER TABLE criteria ADD COLUMN upload_source TEXT");
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec("ALTER TABLE criteria ADD COLUMN uploaded_at TEXT");
   } catch {
     /* column already exists */
   }
@@ -328,6 +349,11 @@ export function createSqliteStore(dbPath) {
     listPromptTemplates: () => db.prepare("SELECT * FROM prompt_templates ORDER BY category, name").all(),
     getPromptTemplate: (id) => db.prepare("SELECT * FROM prompt_templates WHERE id=?").get(id) || null,
     updatePromptTemplate: (id, obj) => updateRow("prompt_templates", "id", id, obj),
+
+    // criteria upload audit log (raw JSON kept for traceability)
+    insertCriteriaUpload: (obj) => insertRow("criteria_uploads", obj),
+    listCriteriaUploads: () =>
+      db.prepare("SELECT id, filename, source, uploaded_at, criteria_count, created_count, updated_count, criterion_ids FROM criteria_uploads ORDER BY uploaded_at DESC").all(),
 
     // generic (data import/export)
     allRows: (base) => db.prepare(`SELECT * FROM ${base}`).all(),

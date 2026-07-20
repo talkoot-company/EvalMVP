@@ -268,6 +268,107 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     res.json(rows.map(rowToCriterion));
   }));
 
+  // Bulk upsert criteria from an uploaded JSON file. Validates the whole file
+  // first (applies nothing on any error), tags each row with the upload source +
+  // date, and records the raw upload for traceability. Literal route — must be
+  // registered before GET /api/criteria/:id.
+  app.post("/api/criteria/bulk-upload", route(async (req, res) => {
+    const body = req.body || {};
+    const raw = typeof body.raw === "string" ? body.raw : "";
+    if (!raw.trim()) throw new HttpError(422, "raw (the uploaded JSON file content) is required");
+
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch (e) { throw new HttpError(422, `Invalid JSON: ${e.message || e}`); }
+
+    const list = Array.isArray(parsed) ? parsed
+      : (parsed && Array.isArray(parsed.criteria)) ? parsed.criteria : null;
+    if (!list) throw new HttpError(422, "Expected an object with a 'criteria' array (or a bare array of criteria).");
+    if (list.length === 0) throw new HttpError(422, "No criteria in the upload.");
+
+    const VALID_TYPES = new Set(["yes-no", "numerical-scale", "numerical-count"]);
+    const errors = [];
+    list.forEach((c, i) => {
+      if (!c || typeof c !== "object") { errors.push({ index: i, message: "not an object" }); return; }
+      if (!c.criteria_name) errors.push({ index: i, message: "criteria_name is required" });
+      if (!c.content_type) errors.push({ index: i, message: "content_type is required" });
+      if (!c.criteria_type) errors.push({ index: i, message: "criteria_type is required" });
+      else if (!VALID_TYPES.has(c.criteria_type)) errors.push({ index: i, message: `criteria_type must be one of: ${[...VALID_TYPES].join(", ")}` });
+    });
+    if (errors.length) {
+      res.status(422).json({ detail: `${errors.length} invalid criteri${errors.length === 1 ? "on" : "a"} — nothing was applied`, errors });
+      return;
+    }
+
+    const source = (body.source && String(body.source).trim())
+      || (parsed && !Array.isArray(parsed) && parsed.source)
+      || body.filename || "upload";
+    const uploadedAt = nowIso();
+    let created = 0, updated = 0;
+    const affected = [];
+
+    for (const c of list) {
+      const cid = c.id || `${slugify(c.criteria_name)}-${slugify(c.content_type)}`;
+      const existing = await store.getCriterion(cid);
+      if (existing) {
+        const merged = { ...rowToCriterion(existing) };
+        for (const col of CRITERIA_COLUMNS) { if (col in c) merged[col] = c[col]; }
+        await store.updateCriterion(cid, {
+          context: merged.context, content_type: merged.content_type,
+          criteria_category: merged.criteria_category, criteria_name: merged.criteria_name,
+          criteria_definition: merged.criteria_definition ?? "", criteria_type: merged.criteria_type,
+          eval_definition: JSON.stringify(merged.eval_definition ?? {}),
+          weight: merged.weight, active: merged.active,
+          marketplace_tag: merged.marketplace_tag, brand_tag: merged.brand_tag, industry_tag: merged.industry_tag,
+          customer: merged.customer, brand: merged.brand,
+          custom_tags: JSON.stringify(merged.custom_tags ?? {}), notes: merged.notes ?? null,
+          upload_source: source, uploaded_at: uploadedAt, updated_at: uploadedAt,
+        });
+        updated++;
+      } else {
+        await store.insertCriterion({
+          id: cid,
+          context: c.context ?? "", content_type: c.content_type,
+          criteria_category: c.criteria_category ?? null, criteria_name: c.criteria_name,
+          criteria_definition: c.criteria_definition ?? "", criteria_type: c.criteria_type,
+          eval_definition: JSON.stringify(c.eval_definition ?? {}),
+          weight: c.weight ?? 1.0, active: c.active === false ? false : true,
+          marketplace_tag: c.marketplace_tag ?? null, brand_tag: c.brand_tag ?? null, industry_tag: c.industry_tag ?? null,
+          customer: c.customer ?? null, brand: c.brand ?? null,
+          custom_tags: JSON.stringify(c.custom_tags ?? {}), notes: c.notes ?? null,
+          upload_source: source, uploaded_at: uploadedAt,
+          created_at: uploadedAt, updated_at: uploadedAt,
+        });
+        created++;
+      }
+      affected.push(cid);
+    }
+
+    const uploadId = randomUUID();
+    await store.insertCriteriaUpload({
+      id: uploadId,
+      filename: body.filename ?? null,
+      source,
+      uploaded_at: uploadedAt,
+      criteria_count: list.length,
+      created_count: created,
+      updated_count: updated,
+      criterion_ids: JSON.stringify(affected),
+      raw_json: raw,
+    });
+
+    res.json({ upload_id: uploadId, source, uploaded_at: uploadedAt, total: list.length, created, updated, criterion_ids: affected });
+  }));
+
+  // Upload history (metadata only; raw JSON kept in the DB for traceability).
+  app.get("/api/criteria/uploads", route(async (req, res) => {
+    const rows = await store.listCriteriaUploads();
+    res.json(rows.map((r) => ({
+      ...r,
+      criterion_ids: typeof r.criterion_ids === "string" ? JSON.parse(r.criterion_ids || "[]") : (r.criterion_ids || []),
+    })));
+  }));
+
   app.get("/api/criteria/:id", route(async (req, res) => {
     const row = await store.getCriterion(req.params.id);
     if (!row) throw new HttpError(404, "Criterion not found");
