@@ -9,8 +9,17 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { ScoreBadge } from "@/components/ScoreBadge";
 import { FilterDropdown } from "@/components/CriteriaFilterBar";
+import { useGenerationDatasets } from "@/hooks/useGenerations";
+import { datasetLabel } from "@/lib/datasets";
 import { ChatChainModal } from "@/components/ChatChainModal";
 import { RewriteDialog, type RewriteIteration } from "@/components/RewriteDialog";
 import { GenerationOutputModal } from "@/components/GenerationOutputModal";
@@ -107,6 +116,7 @@ export function SuiteTestPanel({
 
   // selector filters
   const [search, setSearch] = useState("");
+  const [datasetFilter, setDatasetFilter] = useState("all");
   const [validProductDataOnly, setValidProductDataOnly] = useState(true);
   const [page, setPage] = useState(0);
 
@@ -162,10 +172,12 @@ export function SuiteTestPanel({
   const clearGenType = () => { setGenTypeTouched(true); setPage(0); setManualGenTypes(new Set()); };
 
   // --- generation fetch (server-paginated) ---------------------------------
+  const { data: datasets = [] } = useGenerationDatasets();
   const { data, isLoading } = useQuery({
-    queryKey: ["suite-gens", [...genTypeFilter].sort(), validProductDataOnly, search, page],
+    queryKey: ["suite-gens", [...genTypeFilter].sort(), datasetFilter, validProductDataOnly, search, page],
     queryFn: () => generationsApi.list({
       genTypes: [...genTypeFilter],
+      dataset: datasetFilter,
       validProductData: validProductDataOnly,
       search: search || undefined,
       limit: PAGE_SIZE,
@@ -384,6 +396,19 @@ export function SuiteTestPanel({
               onToggle={toggleGenType}
               onClear={clearGenType}
             />
+            {datasets.length > 0 && (
+              <Select value={datasetFilter} onValueChange={(v) => { setDatasetFilter(v); setPage(0); }}>
+                <SelectTrigger className="h-10 w-40 text-xs">
+                  <SelectValue placeholder="All datasets" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All datasets</SelectItem>
+                  {datasets.map((d) => (
+                    <SelectItem key={d} value={d}>{datasetLabel(d)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             <Button
               variant={validProductDataOnly ? "default" : "outline"}
               size="sm" className="h-10 text-xs gap-1.5"

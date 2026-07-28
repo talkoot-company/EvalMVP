@@ -11,6 +11,10 @@ import { CRITERIA_UPLOAD_SPEC } from "@/lib/criteriaUploadSpec";
 
 type Kind = "criteria" | "generations";
 
+// Hidden for now — the zip import cards were confusing users. Flip to `true`
+// to bring back the criteria/generations .zip upload flow.
+const SHOW_ZIP_IMPORT = false;
+
 const VALID_CRITERIA_TYPES = ["yes-no", "numerical-scale", "numerical-count"];
 
 interface ParsedUpload {
@@ -308,34 +312,38 @@ export default function DataPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Data</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Load your starting data here. Import the two files separately — criteria first, then
-          generations. Existing rows with the same ID are overwritten; everything else is kept.
+          Bulk-upload evaluation criteria, or export your data to share or back up. Existing
+          rows with the same ID are overwritten; everything else is kept.
         </p>
       </div>
 
       <BulkCriteriaUploadCard />
 
-      <ImportExportCard
-        kind="criteria"
-        icon={ListChecks}
-        title="Criteria"
-        blurb="The evaluation criteria and their scoring rubrics (plus the content-type mapping). This is what shows up on the Criteria page."
-        filenameHint="evalmvp-criteria-*.zip"
-        summarize={(c) =>
-          `${c.criteria.toLocaleString()} criteria and ${c.type_mapping} type mappings loaded.`
-        }
-      />
+      {SHOW_ZIP_IMPORT && (
+        <ImportExportCard
+          kind="criteria"
+          icon={ListChecks}
+          title="Criteria"
+          blurb="The evaluation criteria and their scoring rubrics (plus the content-type mapping). This is what shows up on the Criteria page."
+          filenameHint="evalmvp-criteria-*.zip"
+          summarize={(c) =>
+            `${c.criteria.toLocaleString()} criteria and ${c.type_mapping} type mappings loaded.`
+          }
+        />
+      )}
 
-      <ImportExportCard
-        kind="generations"
-        icon={Sparkles}
-        title="Generations"
-        blurb="The AI-generated product copy to be evaluated (plus any saved evaluation results). This is what shows up on the Generations page."
-        filenameHint="evalmvp-generations-*.zip"
-        summarize={(c) =>
-          `${c.generations.toLocaleString()} generations and ${c.eval_results.toLocaleString()} evaluation results loaded.`
-        }
-      />
+      {SHOW_ZIP_IMPORT && (
+        <ImportExportCard
+          kind="generations"
+          icon={Sparkles}
+          title="Generations"
+          blurb="The AI-generated product copy to be evaluated (plus any saved evaluation results). This is what shows up on the Generations page."
+          filenameHint="evalmvp-generations-*.zip"
+          summarize={(c) =>
+            `${c.generations.toLocaleString()} generations and ${c.eval_results.toLocaleString()} evaluation results loaded.`
+          }
+        />
+      )}
 
       {/* Export is a separate, secondary concern — kept out of the upload cards. */}
       <div className="border-t pt-4">

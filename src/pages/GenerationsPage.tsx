@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
-import { useGenerations, useGenerationModels } from "@/hooks/useGenerations";
+import { useGenerations, useGenerationModels, useGenerationDatasets } from "@/hooks/useGenerations";
 import type { Generation } from "@/api/generations";
+import { datasetLabel } from "@/lib/datasets";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -168,16 +169,19 @@ const GenerationsPage = () => {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [modelFilter, setModelFilter] = useState("all");
+  const [datasetFilter, setDatasetFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState<ContentType | "all">("all");
   const [validProductDataOnly, setValidProductDataOnly] = useState(true);
   const [page, setPage] = useState(0);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const { data: models = [] } = useGenerationModels();
+  const { data: datasets = [] } = useGenerationDatasets();
 
   const { data, isLoading } = useGenerations({
     search: debouncedSearch,
     model: modelFilter === "all" ? "" : modelFilter,
+    dataset: datasetFilter,
     validProductData: validProductDataOnly,
     limit: PAGE_SIZE,
     offset: page * PAGE_SIZE,
@@ -252,6 +256,20 @@ const GenerationsPage = () => {
             ))}
           </SelectContent>
         </Select>
+
+        {datasets.length > 0 && (
+          <Select value={datasetFilter} onValueChange={(v) => { setDatasetFilter(v); setPage(0); }}>
+            <SelectTrigger className="w-44">
+              <SelectValue placeholder="All datasets" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All datasets</SelectItem>
+              {datasets.map((d) => (
+                <SelectItem key={d} value={d}>{datasetLabel(d)}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
 
         <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none">
           <Switch
