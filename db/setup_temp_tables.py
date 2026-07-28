@@ -96,6 +96,7 @@ GENERATIONS_COLUMNS = [
     ("is_valid",            "BIT",            True),
     ("req_json",            "NVARCHAR(MAX)",  True),
     ("resp_json",           "NVARCHAR(MAX)",  True),
+    ("dataset",             "NVARCHAR(50)",   True),
 ]
 
 EVAL_RESULTS_COLUMNS = [

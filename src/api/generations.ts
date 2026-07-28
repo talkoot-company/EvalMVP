@@ -13,6 +13,7 @@ export interface Generation {
   total_tokens: number | null;
   finish_reason: string | null;
   is_valid: boolean | null;
+  dataset: string | null;
   req_json: Record<string, unknown> | null;
   resp_json: Record<string, unknown> | null;
   // True when the generation has a non-empty stored product_json record. Present
@@ -34,10 +35,11 @@ async function apiFetch<T>(path: string): Promise<T> {
 }
 
 export const generationsApi = {
-  list: (params: { search?: string; model?: string; limit?: number; offset?: number; validProductData?: boolean; genTypes?: string[] } = {}): Promise<GenerationsPage> => {
+  list: (params: { search?: string; model?: string; dataset?: string; limit?: number; offset?: number; validProductData?: boolean; genTypes?: string[] } = {}): Promise<GenerationsPage> => {
     const qs = new URLSearchParams();
     if (params.search) qs.set("search", params.search);
     if (params.model) qs.set("model", params.model);
+    if (params.dataset && params.dataset !== "all") qs.set("dataset", params.dataset);
     if (params.limit !== undefined) qs.set("limit", String(params.limit));
     if (params.offset !== undefined) qs.set("offset", String(params.offset));
     if (params.validProductData) qs.set("valid_product_data", "1");
@@ -48,4 +50,6 @@ export const generationsApi = {
   get: (id: string): Promise<Generation> => apiFetch(`/generations/${id}`),
 
   models: (): Promise<string[]> => apiFetch("/generations/models"),
+
+  datasets: (): Promise<string[]> => apiFetch("/generations/datasets"),
 };

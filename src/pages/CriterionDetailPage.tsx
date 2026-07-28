@@ -18,6 +18,11 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
+import { useGenerationDatasets } from "@/hooks/useGenerations";
+import { datasetLabel } from "@/lib/datasets";
 import { InlineEdit } from "@/components/InlineEdit";
 import { ScoreBadge } from "@/components/ScoreBadge";
 import { ChatChainModal } from "@/components/ChatChainModal";
@@ -467,6 +472,7 @@ function MatchingGenerationsTable({
   const [isRunning, setIsRunning] = useState(false);
   const [viewChat, setViewChat] = useState<{ request: ChatMessagesRequest; title: string } | null>(null);
   const [validProductDataOnly, setValidProductDataOnly] = useState(true);
+  const [datasetFilter, setDatasetFilter] = useState("all");
 
   function toggleTestSet(generationId: string) {
     setTestSet((prev) => {
@@ -577,10 +583,12 @@ function MatchingGenerationsTable({
   // pagination — the dataset has thousands of each type, so loading "the most
   // recent N" client-side would miss almost all of a less-recent type (e.g.
   // Bullets). The DB classifies type with the same keyword logic as inferType.
+  const { data: datasets = [] } = useGenerationDatasets();
   const { data, isLoading } = useQuery({
-    queryKey: ["generations-matching", criterionId, applicableGenTypes, validProductDataOnly, page],
+    queryKey: ["generations-matching", criterionId, applicableGenTypes, datasetFilter, validProductDataOnly, page],
     queryFn: () => generationsApi.list({
       genTypes: applicableGenTypes,
+      dataset: datasetFilter,
       validProductData: validProductDataOnly,
       limit: PAGE_SIZE,
       offset: page * PAGE_SIZE,
@@ -648,6 +656,19 @@ function MatchingGenerationsTable({
         </span>
 
         <div className="flex items-center gap-3">
+          {datasets.length > 0 && (
+            <Select value={datasetFilter} onValueChange={(v) => { setDatasetFilter(v); setPage(0); }}>
+              <SelectTrigger className="h-8 w-36 text-xs">
+                <SelectValue placeholder="All datasets" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All datasets</SelectItem>
+                {datasets.map((d) => (
+                  <SelectItem key={d} value={d}>{datasetLabel(d)}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
             <Switch
               checked={validProductDataOnly}

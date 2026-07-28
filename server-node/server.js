@@ -542,13 +542,14 @@ export function createApp({ store, resultsDir, staticDir = null }) {
   app.get("/api/generations", route(async (req, res) => {
     const search = req.query.search || "";
     const model = req.query.model || "";
+    const dataset = req.query.dataset || "";
     const limit = Number(req.query.limit ?? 100);
     const offset = Number(req.query.offset ?? 0);
     const validProductData = req.query.valid_product_data === "1" || req.query.valid_product_data === "true";
     const genTypes = req.query.gen_types
       ? String(req.query.gen_types).split(",").map((s) => s.trim()).filter(Boolean)
       : undefined;
-    const { total, rows } = await store.listGenerations({ search, model, limit, offset, validProductData, genTypes });
+    const { total, rows } = await store.listGenerations({ search, model, dataset, limit, offset, validProductData, genTypes });
     res.json({ total, limit, offset, items: rows.map((r) => rowToGeneration(r)) });
   }));
 
@@ -559,6 +560,10 @@ export function createApp({ store, resultsDir, staticDir = null }) {
 
   app.get("/api/generations/models", route(async (req, res) => {
     res.json(await store.listGenerationModels());
+  }));
+
+  app.get("/api/generations/datasets", route(async (req, res) => {
+    res.json(await store.listGenerationDatasets());
   }));
 
   app.get("/api/generations/:id", route(async (req, res) => {
