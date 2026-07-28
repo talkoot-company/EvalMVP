@@ -20,7 +20,7 @@ const PK = {
 const GEN_LIST_COLS =
   "generation_id, model, created_at, system_prompt, last_user_message, " +
   "few_shot_count, temperature, max_tokens, response_content, prompt_tokens, " +
-  "completion_tokens, total_tokens, finish_reason, is_valid, " +
+  "completion_tokens, total_tokens, finish_reason, is_valid, dataset, " +
   "CASE WHEN product_json IS NOT NULL AND product_json <> '{}' THEN 1 ELSE 0 END AS has_product_data";
 
 // SQL predicate identifying generations with valid (non-empty) stored product data.
@@ -152,6 +152,12 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     `IF COL_LENGTH(N'[dbo].[${prefix}generations]', N'gen_type') IS NULL
      ALTER TABLE [dbo].[${prefix}generations] ADD gen_type NVARCHAR(20) NULL;`
   );
+  // Dataset discriminator (e.g. 'cocacola' / 'puma') so the UI can scope
+  // generations by dataset. Populated/backfilled by db/import_puma.py.
+  await q(
+    `IF COL_LENGTH(N'[dbo].[${prefix}generations]', N'dataset') IS NULL
+     ALTER TABLE [dbo].[${prefix}generations] ADD dataset NVARCHAR(50) NULL;`
+  );
   // Provenance columns for bulk-uploaded criteria.
   await q(
     `IF COL_LENGTH(N'[dbo].[${prefix}criteria]', N'upload_source') IS NULL
@@ -164,6 +170,10 @@ export async function createMssqlStore({ adonet, database, prefix }) {
   await q(
     `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_${prefix}generations_gen_type')
      CREATE INDEX [idx_${prefix}generations_gen_type] ON [dbo].[${prefix}generations](gen_type);`
+  );
+  await q(
+    `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_${prefix}generations_dataset')
+     CREATE INDEX [idx_${prefix}generations_dataset] ON [dbo].[${prefix}generations](dataset);`
   );
 
   // Self-provision the suites + suite_criteria (junction) tables. Also created by
@@ -263,7 +273,7 @@ export async function createMssqlStore({ adonet, database, prefix }) {
       one(`SELECT * FROM ${tbl("criteria")} WHERE LOWER(criteria_name)=LOWER(@p0)`, [name]),
 
     // generations
-    listGenerations: async ({ search, model, limit, offset, validProductData, genTypes }) => {
+    listGenerations: async ({ search, model, dataset, limit, offset, validProductData, genTypes }) => {
       const cond = [], params = [];
       if (search) {
         const p = params.length;
@@ -272,6 +282,7 @@ export async function createMssqlStore({ adonet, database, prefix }) {
         params.push(l, l, l);
       }
       if (model) { cond.push(`model=@p${params.length}`); params.push(model); }
+      if (dataset && dataset !== "all") { cond.push(`dataset=@p${params.length}`); params.push(dataset); }
       if (validProductData) cond.push(HAS_PRODUCT_DATA_SQL);
       if (genTypes && genTypes.length) {
         const placeholders = genTypes.map((_, i) => `@p${params.length + i}`).join(",");
@@ -292,6 +303,9 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     listGenerationModels: async () =>
       (await q(`SELECT DISTINCT model FROM ${tbl("generations")} WHERE model IS NOT NULL ORDER BY model`))
         .map((r) => r.model),
+    listGenerationDatasets: async () =>
+      (await q(`SELECT DISTINCT dataset FROM ${tbl("generations")} WHERE dataset IS NOT NULL ORDER BY dataset`))
+        .map((r) => r.dataset),
     getGeneration: async (id) =>
       fixGeneration(await one(`SELECT * FROM ${tbl("generations")} WHERE generation_id=@p0`, [id])),
 

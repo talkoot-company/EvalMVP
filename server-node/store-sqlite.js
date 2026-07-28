@@ -46,7 +46,8 @@ const BASE_SCHEMA = `
     req_json            TEXT,
     resp_json           TEXT,
     product_json        TEXT,
-    gen_type            TEXT
+    gen_type            TEXT,
+    dataset             TEXT
   );
   CREATE TABLE IF NOT EXISTS eval_results (
     id TEXT PRIMARY KEY, generation_id TEXT NOT NULL,
@@ -140,7 +141,7 @@ const COUNTS_BY_TYPE_SQL = `
 const GEN_LIST_COLS =
   "generation_id, model, created_at, system_prompt, last_user_message, " +
   "few_shot_count, temperature, max_tokens, response_content, prompt_tokens, " +
-  "completion_tokens, total_tokens, finish_reason, is_valid, " +
+  "completion_tokens, total_tokens, finish_reason, is_valid, dataset, " +
   "CASE WHEN product_json IS NOT NULL AND product_json <> '{}' THEN 1 ELSE 0 END AS has_product_data";
 
 // SQL predicate identifying generations with valid (non-empty) stored product data.
@@ -178,6 +179,11 @@ export function createSqliteStore(dbPath) {
     /* column already exists */
   }
   try {
+    db.exec("ALTER TABLE generations ADD COLUMN dataset TEXT");
+  } catch {
+    /* column already exists */
+  }
+  try {
     db.exec("ALTER TABLE criteria ADD COLUMN upload_source TEXT");
   } catch {
     /* column already exists */
@@ -188,6 +194,7 @@ export function createSqliteStore(dbPath) {
     /* column already exists */
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_generations_gen_type ON generations(gen_type)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_generations_dataset ON generations(dataset)");
   if (db.prepare("SELECT COUNT(*) AS n FROM type_mapping").get().n === 0) {
     const ins = db.prepare("INSERT OR IGNORE INTO type_mapping VALUES (?,?)");
     for (const [ct, gt] of [
@@ -242,7 +249,7 @@ export function createSqliteStore(dbPath) {
       db.prepare("SELECT * FROM criteria WHERE LOWER(criteria_name)=LOWER(?)").get(name) || null,
 
     // generations
-    listGenerations: ({ search, model, limit, offset, validProductData, genTypes }) => {
+    listGenerations: ({ search, model, dataset, limit, offset, validProductData, genTypes }) => {
       const cond = [], params = [];
       if (search) {
         cond.push("(last_user_message LIKE ? OR response_content LIKE ? OR system_prompt LIKE ?)");
@@ -250,6 +257,7 @@ export function createSqliteStore(dbPath) {
         params.push(l, l, l);
       }
       if (model) { cond.push("model=?"); params.push(model); }
+      if (dataset && dataset !== "all") { cond.push("dataset=?"); params.push(dataset); }
       if (validProductData) cond.push(HAS_PRODUCT_DATA_SQL);
       if (genTypes && genTypes.length) {
         cond.push(`gen_type IN (${genTypes.map(() => "?").join(",")})`);
@@ -265,6 +273,8 @@ export function createSqliteStore(dbPath) {
     countGenerationsByType: () => db.prepare(COUNTS_BY_TYPE_SQL).all(),
     listGenerationModels: () =>
       db.prepare("SELECT DISTINCT model FROM generations WHERE model IS NOT NULL ORDER BY model").all().map((r) => r.model),
+    listGenerationDatasets: () =>
+      db.prepare("SELECT DISTINCT dataset FROM generations WHERE dataset IS NOT NULL ORDER BY dataset").all().map((r) => r.dataset),
     getGeneration: (id) => db.prepare("SELECT * FROM generations WHERE generation_id=?").get(id) || null,
 
     // Persist the (keyword-derived) generation type so it can be filtered/indexed

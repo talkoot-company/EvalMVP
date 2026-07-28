@@ -21,6 +21,7 @@ evalmvp-*.zip
 # file are read by the app (db/seed.py); the rest never belongs in git
 data/cocacola_extracted/
 data/generations_coke/
+data
 data/*.zip
 db/evals.db
 server/results/
@@ -39,3 +40,10 @@ __pycache__/
 data/*.json
 evalmvp-data-bootstrap/*
 data/
+
+# Local debug/scratch output (DB dumps, etc.)
+debug/
+
+# Local secrets & tooling — never commit
+/env
+.codegraph/
