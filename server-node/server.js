@@ -18,7 +18,10 @@ import {
   heuristicProductFields, aiExtractProductFields, productDataFromFields, formatProductSection,
 } from "./eval-runner.js";
 import { exportZipBuffer, importZipBuffer, KINDS } from "./data-transfer.js";
-import { renderTemplate, defaultTemplate, DEFAULT_PROMPTS } from "./prompt-templates.js";
+import {
+  renderTemplate, defaultTemplate, DEFAULT_PROMPTS,
+  DEFAULT_REWRITE_ORCHESTRATION_PROMPT, REWRITE_ORCHESTRATION_PLACEHOLDERS,
+} from "./prompt-templates.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -161,7 +164,7 @@ const CRITERIA_COLUMNS = [
   "customer", "brand", "custom_tags", "notes",
 ];
 
-const SUITE_COLUMNS = ["name", "description", "active"];
+const SUITE_COLUMNS = ["name", "description", "active", "rewrite_orchestration_prompt"];
 const PROMPT_TEMPLATE_COLUMNS = ["name", "description", "template"];
 
 const GENERATION_TYPES = ["Title", "Description", "Bullets", "Sustainability", "Extraction", "Other"];
@@ -213,12 +216,11 @@ function buildPostEditPrompt({ systemPrompt, productSection, originalContent, cr
   });
 }
 
-// The exact prompt sent to the LLM to rewrite copy using the AGGREGATED feedback
-// from every criterion the generation was evaluated against. Passing criteria are
-// flagged as strengths to preserve; failing ones as the changes to make.
-function buildRewritePrompt({ systemPrompt, productSection, originalContent, feedback }, template) {
+// Formats the aggregated per-criterion feedback into the human-readable blocks
+// shared by the rewrite prompt and the rewrite-orchestration prompt.
+function formatFeedbackBlocks(feedback) {
   const items = Array.isArray(feedback) ? feedback : [];
-  const feedbackBlocks = items.map((f, i) => {
+  return items.map((f, i) => {
     const passed = String(f.score) === String(f.desired_score);
     const label = passed
       ? "PASS — keep this strength"
@@ -230,14 +232,54 @@ function buildRewritePrompt({ systemPrompt, productSection, originalContent, fee
     }
     return `${i + 1}. ${f.criterion_name} — ${label} (score ${f.score})\n   Feedback: ${f.rationale}${evidenceBlock}`;
   }).join("\n\n");
+}
 
-  return renderTemplate(template ?? defaultTemplate("rewrite_aggregate"), {
+// The rewrite-orchestration prompt: runs BEFORE the aggregate rewrite and turns
+// the full feedback + current copy into a single coherence thesis. `template` is
+// the suite's stored prompt (or the built-in default when the suite has none).
+function buildOrchestrationPrompt({ systemPrompt, productSection, originalContent, feedback }, template) {
+  return renderTemplate(template || DEFAULT_REWRITE_ORCHESTRATION_PROMPT, {
+    system_prompt: systemPrompt,
+    product_data: productSection,
+    original_copy: originalContent,
+    feedback: formatFeedbackBlocks(feedback),
+  });
+}
+
+// The exact prompt sent to the LLM to rewrite copy using the AGGREGATED feedback
+// from every criterion the generation was evaluated against. Passing criteria are
+// flagged as strengths to preserve; failing ones as the changes to make. `thesis`
+// is the coherence thesis produced by the orchestration step (may be empty).
+function buildRewritePrompt({ systemPrompt, productSection, originalContent, feedback, thesis }, template) {
+  const items = Array.isArray(feedback) ? feedback : [];
+  const tmpl = template ?? defaultTemplate("rewrite_aggregate");
+  let rendered = renderTemplate(tmpl, {
     system_prompt: systemPrompt,
     product_data: productSection,
     original_copy: originalContent,
     criteria_count: `${items.length} criteri${items.length === 1 ? "on" : "a"}`,
-    feedback: feedbackBlocks,
+    feedback: formatFeedbackBlocks(feedback),
+    thesis: thesis || "",
   });
+  // If the effective template has no {thesis} slot (a legacy-seeded or
+  // user-customized rewrite_aggregate), append the orchestration thesis so it
+  // still reaches the rewrite instead of being silently dropped.
+  if (thesis && !tmpl.includes("{thesis}")) {
+    rendered += `\n\n--- REWRITE THESIS & DRAFTING INSTRUCTIONS ---\n${thesis}\n\nBuild the copy around the single customer-use proposition and drafting instructions above — develop one coherent idea rather than addressing the feedback one item at a time.`;
+  }
+  return rendered;
+}
+
+// Resolve the rewrite-orchestration prompt for a rewrite: the suite's own prompt
+// if it has one, otherwise the built-in default (which also covers rewrites with
+// no suite context and suites that never set a prompt).
+async function resolveOrchestrationPrompt(store, suiteId) {
+  if (suiteId) {
+    const suite = await store.getSuite(suiteId);
+    const prompt = suite && suite.rewrite_orchestration_prompt;
+    if (typeof prompt === "string" && prompt.trim()) return prompt;
+  }
+  return DEFAULT_REWRITE_ORCHESTRATION_PROMPT;
 }
 
 export function createApp({ store, resultsDir, staticDir = null }) {
@@ -481,6 +523,9 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       name: String(body.name).trim(),
       description: body.description ?? null,
       active: body.active === false ? false : true,
+      // Left null on create → the rewrite falls back to the default orchestration
+      // prompt until the suite sets its own.
+      rewrite_orchestration_prompt: body.rewrite_orchestration_prompt ?? null,
       created_at: now,
       updated_at: now,
     });
@@ -503,6 +548,7 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       name: merged.name,
       description: merged.description ?? null,
       active: merged.active,
+      rewrite_orchestration_prompt: merged.rewrite_orchestration_prompt ?? null,
       updated_at: nowIso(),
     });
     res.json({ ...rowToSuite(await store.getSuite(req.params.id)), criteria_ids: await store.getSuiteCriterionIds(req.params.id) });
@@ -781,6 +827,31 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     res.json(await store.listChainGenerationIds(String(criterion_id)));
   }));
 
+  // ----- Suite rewrite chains (aggregate-rewrite iterations per suite+generation) -----
+
+  // All rewrite chains for a suite, as { generation_id, data }[] (panel loads once).
+  app.get("/api/suite/rewrite-chains", route(async (req, res) => {
+    const { suite_id } = req.query;
+    if (!suite_id) throw new HttpError(422, "suite_id is required");
+    res.json(await store.listSuiteRewriteChains(String(suite_id)));
+  }));
+
+  app.put("/api/suite/rewrite-chain", route(async (req, res) => {
+    const body = req.body || {};
+    if (!body.suite_id || !body.generation_id || !body.data) {
+      throw new HttpError(422, "suite_id, generation_id and data are required");
+    }
+    await store.saveSuiteRewriteChain(String(body.suite_id), String(body.generation_id), body.data);
+    res.json(await store.getSuiteRewriteChain(String(body.suite_id), String(body.generation_id)));
+  }));
+
+  app.delete("/api/suite/rewrite-chain", route(async (req, res) => {
+    const { suite_id, generation_id } = req.query;
+    if (!suite_id || !generation_id) throw new HttpError(422, "suite_id and generation_id are required");
+    await store.deleteSuiteRewriteChain(String(suite_id), String(generation_id));
+    res.status(204).end();
+  }));
+
   // ----- Post-edit route -----
 
   app.post("/api/post-edit", route(async (req, res) => {
@@ -838,11 +909,31 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       ? body.content
       : (genRow.response_content || "");
 
+    // Orchestration step: turn the full feedback + current copy into a single
+    // coherence thesis before drafting. Uses the suite's prompt (or the default).
+    const orchestrationPrompt = await resolveOrchestrationPrompt(store, body.suite_id);
+    let thesis = "";
+    try {
+      const orchPrompt = buildOrchestrationPrompt({
+        systemPrompt, productSection, originalContent, feedback: body.feedback,
+      }, orchestrationPrompt);
+      const orchResp = await aiClient().chat.completions.create({
+        model: llmModel(),
+        messages: [{ role: "user", content: orchPrompt }],
+      });
+      thesis = (orchResp.choices[0]?.message?.content || "").trim();
+    } catch (err) {
+      // Don't fail the whole rewrite if orchestration fails — fall back to a
+      // thesis-less rewrite so the feature degrades gracefully.
+      console.error(`[rewrite] orchestration step failed, continuing without thesis: ${err.message || err}`);
+    }
+
     const rewritePrompt = buildRewritePrompt({
       systemPrompt,
       productSection,
       originalContent,
       feedback: body.feedback,
+      thesis,
     }, await loadTemplate("rewrite_aggregate"));
 
     let improved;
@@ -856,7 +947,16 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       throw new HttpError(500, `Rewrite failed: ${err.message || err}`);
     }
 
-    res.json({ improved_content: improved.trim() });
+    res.json({ improved_content: improved.trim(), thesis });
+  }));
+
+  // The built-in default rewrite-orchestration prompt + its available parameters,
+  // so the suite editor can prefill (when a suite has none) and show the legend.
+  app.get("/api/rewrite-orchestration/default", route(async (req, res) => {
+    res.json({
+      template: DEFAULT_REWRITE_ORCHESTRATION_PROMPT,
+      placeholders: REWRITE_ORCHESTRATION_PLACEHOLDERS,
+    });
   }));
 
   // Reconstruct (without calling the LLM) the exact chat chain that was/would be
@@ -874,13 +974,25 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       const originalContent = (typeof body.content === "string" && body.content.trim())
         ? body.content
         : (genRow.response_content || "");
-      const prompt = buildRewritePrompt({
-        systemPrompt,
-        productSection,
-        originalContent,
-        feedback: body.feedback,
+      // Reconstruct the full two-step chain: the orchestration prompt (resolved
+      // from the suite or default), the thesis it produced (stored per iteration,
+      // passed back here), then the rewrite prompt that develops that thesis.
+      const orchestrationPrompt = await resolveOrchestrationPrompt(store, body.suite_id);
+      const orchPrompt = buildOrchestrationPrompt({
+        systemPrompt, productSection, originalContent, feedback: body.feedback,
+      }, orchestrationPrompt);
+      const thesis = typeof body.thesis === "string" ? body.thesis : "";
+      const rewritePrompt = buildRewritePrompt({
+        systemPrompt, productSection, originalContent, feedback: body.feedback, thesis,
       }, await loadTemplate("rewrite_aggregate"));
-      res.json({ mode, messages: [{ role: "user", content: prompt }] });
+      res.json({
+        mode,
+        messages: [
+          { role: "user", content: orchPrompt },
+          { role: "assistant", content: thesis || "(the orchestration thesis is generated at run time)" },
+          { role: "user", content: rewritePrompt },
+        ],
+      });
       return;
     }
 

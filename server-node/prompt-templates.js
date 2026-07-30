@@ -101,8 +101,11 @@ Rewrite the copy to address the evaluation feedback and achieve the target score
 --- EVALUATION FEEDBACK ({criteria_count}) ---
 {feedback}
 
+--- REWRITE THESIS & DRAFTING INSTRUCTIONS ---
+{thesis}
+
 --- INSTRUCTIONS ---
-Rewrite the copy to satisfy every "NEEDS IMPROVEMENT" criterion while preserving the qualities that already "PASS" — do not regress them.
+Build the copy around the single customer-use proposition and drafting instructions in the thesis above — develop one coherent idea rather than addressing the feedback one item at a time. Satisfy every "NEEDS IMPROVEMENT" criterion through that proposition while preserving the qualities that already "PASS" — do not regress them.
 - Keep the same format and approximate length as the original.
 - Only change what is needed to fix the failing criteria without breaking the passing ones.
 - Do not add commentary or explanations — output only the improved copy.
@@ -113,6 +116,7 @@ Rewrite the copy to satisfy every "NEEDS IMPROVEMENT" criterion while preserving
       { token: "original_copy", description: "The copy to improve (latest rewrite or the original output).", required: true },
       { token: "criteria_count", description: "Computed label, e.g. \"3 criteria\" / \"1 criterion\".", required: false },
       { token: "feedback", description: "Computed per-criterion feedback blocks (PASS / NEEDS IMPROVEMENT + rationale + flagged passages).", required: true },
+      { token: "thesis", description: "The coherence thesis + drafting instructions produced by the suite's rewrite orchestration prompt.", required: false },
     ],
   },
   {
@@ -133,6 +137,57 @@ CONTENT:
     ],
   },
 ];
+
+// Per-suite "rewrite orchestration prompt". Unlike the four global templates
+// above, this is stored per suite (suites.rewrite_orchestration_prompt) and
+// overridable in the suite UI. Suites with no value fall back to this default.
+// It runs BEFORE the aggregate rewrite: it reads the full evaluation feedback +
+// current copy and resolves them into ONE coherence thesis (message map +
+// drafting instructions) that the rewrite then develops — instead of the rewrite
+// patching feedback one item at a time.
+export const REWRITE_ORCHESTRATION_PLACEHOLDERS = [
+  { token: "system_prompt", description: "The generation's original task/system prompt.", required: false },
+  { token: "product_data", description: "Computed grounding block (extracted product fields or the creative brief).", required: false },
+  { token: "original_copy", description: "The current copy being rewritten (latest rewrite or the original output).", required: true },
+  { token: "feedback", description: "Per-criterion evaluation output (PASS / NEEDS IMPROVEMENT + rationale + flagged passages).", required: true },
+];
+
+export const DEFAULT_REWRITE_ORCHESTRATION_PROMPT = `You are a rewrite orchestrator. Before any copy is rewritten, read the full evaluation feedback and the current copy and resolve them into a SINGLE coherence thesis the rewrite will be built around — not a checklist of fixes. Do NOT write the final copy.
+
+--- ORIGINAL TASK ---
+{system_prompt}
+
+--- PRODUCT DATA ---
+{product_data}
+
+--- CURRENT COPY ---
+{original_copy}
+
+--- EVALUATION FEEDBACK ---
+{feedback}
+
+Examine the feedback holistically and choose ONE central customer-use proposition that the rewrite should develop. Then output an internal message map and drafting instructions the writer will follow, in exactly these three sections:
+
+MESSAGE MAP
+- PRIMARY CUSTOMER MOMENT: Where and when does this product enter the customer's life?
+- UNDERLYING NEED OR TENSION: What is changing, difficult, desired, or being balanced in that moment?
+- DESIRED EXPECTATION: What should the customer understand the product will feel like or enable?
+- PRIORITY BENEFITS: The two or three consequences that matter most in that moment.
+- SUPPORTING PRODUCT EVIDENCE: The verified features or materials that credibly support those benefits.
+- SECONDARY DETAILS: Facts that are useful but must not compete with the proposition.
+- LIMITATIONS OR TRADEOFFS: What must remain visible to prevent mismatch.
+
+COHERENCE THESIS
+One or two sentences stating the single customer-use proposition the rewrite must develop.
+
+DRAFTING INSTRUCTIONS
+- Draft around the one proposition above; establish or evoke the central where, when, and why early enough to frame the description.
+- Select only product evidence that advances, qualifies, or completes that proposition. Translate technical or branded features into their lived significance, but do not create one explanatory clause for every available feature.
+- Treat visual, logo, packaging, and secondary specification details as subordinate unless central to the reason to choose. Do not reward greater feature coverage, technical density, or sentence length.
+- Address every NEEDS IMPROVEMENT criterion through this single proposition rather than one clause per criterion, and preserve the strengths already marked PASS.
+- Reject a draft when: the use-case phrase can be removed without changing the rest; most feature clauses can be freely reordered; each sentence appears to satisfy a different evaluation rather than develop the same idea; or the opening promises a customer story the body does not continue.
+
+Output only these three sections. Do not write the final copy.`;
 
 const BY_ID = new Map(DEFAULT_PROMPTS.map((p) => [p.id, p]));
 

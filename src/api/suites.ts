@@ -29,7 +29,7 @@ export const suitesApi = {
   create: (suite: NewSuite): Promise<Suite> =>
     apiFetch("/suites", { method: "POST", body: JSON.stringify(suite) }),
 
-  update: (id: string, patch: Partial<Pick<Suite, "name" | "description" | "active">>): Promise<Suite> =>
+  update: (id: string, patch: Partial<Pick<Suite, "name" | "description" | "active" | "rewrite_orchestration_prompt">>): Promise<Suite> =>
     apiFetch(`/suites/${id}`, { method: "PUT", body: JSON.stringify(patch) }),
 
   delete: (id: string): Promise<void> =>
@@ -45,3 +45,20 @@ export const suitesApi = {
   removeCriterion: (id: string, criterionId: string): Promise<void> =>
     apiFetch(`/suites/${id}/criteria/${encodeURIComponent(criterionId)}`, { method: "DELETE" }),
 };
+
+export interface OrchestrationPlaceholder {
+  token: string;
+  description: string;
+  required: boolean;
+}
+
+export interface RewriteOrchestrationDefault {
+  template: string;
+  placeholders: OrchestrationPlaceholder[];
+}
+
+// The built-in default rewrite-orchestration prompt + its available parameters,
+// used to prefill the suite editor when a suite has no custom prompt and to render
+// the parameter legend.
+export const getRewriteOrchestrationDefault = (): Promise<RewriteOrchestrationDefault> =>
+  apiFetch("/rewrite-orchestration/default");

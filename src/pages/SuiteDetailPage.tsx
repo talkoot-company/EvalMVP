@@ -12,7 +12,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { InlineEdit } from "@/components/InlineEdit";
 import { CriteriaFilterBar } from "@/components/CriteriaFilterBar";
 import { SuiteTestPanel } from "@/components/SuiteTestPanel";
-import { ArrowLeft, Loader2, Eye, EyeOff, ChevronUp, X, Plus, Download } from "lucide-react";
+import { RewriteOrchestrationDialog } from "@/components/RewriteOrchestrationDialog";
+import { ArrowLeft, Loader2, Eye, EyeOff, ChevronUp, X, Plus, Download, Wand2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { downloadJson } from "@/lib/download";
 import { toast } from "sonner";
@@ -72,7 +73,7 @@ export default function SuiteDetailPage() {
   };
 
   const saveMutation = useMutation({
-    mutationFn: (patch: Partial<Pick<Suite, "name" | "description" | "active">>) => suitesApi.update(id!, patch),
+    mutationFn: (patch: Partial<Pick<Suite, "name" | "description" | "active" | "rewrite_orchestration_prompt">>) => suitesApi.update(id!, patch),
     onSuccess: invalidate,
   });
 
@@ -112,7 +113,7 @@ export default function SuiteDetailPage() {
     },
   });
 
-  function saveField(field: "name" | "description", value: string) {
+  function saveField(field: "name" | "description" | "rewrite_orchestration_prompt", value: string) {
     toast.promise(saveMutation.mutateAsync({ [field]: value }), {
       loading: "Saving…",
       success: "Saved",
@@ -123,6 +124,7 @@ export default function SuiteDetailPage() {
   const associated = useMemo(() => new Set(suite?.criteria_ids ?? []), [suite]);
   const selected = useMemo(() => criteria.filter((c) => associated.has(c.id)), [criteria, associated]);
   const [showSelector, setShowSelector] = useState(false);
+  const [orchestrationOpen, setOrchestrationOpen] = useState(false);
 
   // Export the suite's associated criteria as JSON (full criterion objects).
   function exportCriteria() {
@@ -205,6 +207,33 @@ export default function SuiteDetailPage() {
           className="text-sm leading-relaxed"
         />
       </Section>
+
+      {/* Rewrite orchestration prompt */}
+      <Section title="Rewrite">
+        <div className="flex items-center justify-between gap-3 border rounded-md px-3 py-2.5">
+          <p className="text-sm text-muted-foreground">
+            Rewrite orchestration prompt —{" "}
+            <span className="font-medium text-foreground">
+              {suite.rewrite_orchestration_prompt ? "custom" : "using default"}
+            </span>
+            . Builds a coherence thesis from the criteria feedback before each rewrite.
+          </p>
+          <Button
+            variant="outline" size="sm" className="h-8 gap-1.5 text-xs shrink-0"
+            onClick={() => setOrchestrationOpen(true)}
+          >
+            <Wand2 className="h-3.5 w-3.5" /> View / edit prompt
+          </Button>
+        </div>
+      </Section>
+
+      <RewriteOrchestrationDialog
+        open={orchestrationOpen}
+        onOpenChange={setOrchestrationOpen}
+        value={suite.rewrite_orchestration_prompt}
+        onSave={(v) => saveField("rewrite_orchestration_prompt", v)}
+        saving={saveMutation.isPending}
+      />
 
       {/* Associated criteria */}
       <Section

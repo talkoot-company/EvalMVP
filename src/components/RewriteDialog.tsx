@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
-import { evalsApi, type RewriteFeedbackItem } from "@/api/evals";
+import { useState, useEffect, useMemo } from "react";
+import { evalsApi, type RewriteFeedbackItem, type RewriteIteration } from "@/api/evals";
+import { RewriteFlowModal, type RewriteFlowData } from "@/components/RewriteFlowModal";
 import { Button } from "@/components/ui/button";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
@@ -7,16 +8,12 @@ import {
 import { ScoreBadge } from "@/components/ScoreBadge";
 import { downloadJson } from "@/lib/download";
 import { toast } from "sonner";
-import { Loader2, Sparkles, MessageSquare, ChevronDown, ChevronRight, Download } from "lucide-react";
+import { Loader2, Sparkles, MessageSquare, ChevronDown, ChevronRight, Download, Trash2 } from "lucide-react";
 
-// One link in a rewrite chain: the rewritten copy plus its re-grade against
-// every selected criterion. `grades` are RewriteFeedbackItems so the next
-// rewrite can be driven directly by them.
-export interface RewriteIteration {
-  content: string;
-  created_at: string;
-  grades: RewriteFeedbackItem[];
-}
+// Re-exported from the api layer so existing imports from this component keep
+// working. A link in a rewrite chain: the rewritten copy, its re-grade against
+// every selected criterion, and the orchestration thesis that shaped it.
+export type { RewriteIteration };
 
 function mapById(items: RewriteFeedbackItem[]): Map<string, RewriteFeedbackItem> {
   return new Map(items.map((f) => [f.criterion_id, f]));
@@ -56,29 +53,65 @@ export function RewriteDialog({
   open,
   onOpenChange,
   generationId,
+  suiteId,
   model,
   originalCopy,
   baseFeedback,
   chain,
   onChainChange,
-  onViewPrompt,
+  onClearChain,
   autoStart = false,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   generationId: string;
+  suiteId?: string;
   model?: string | null;
   originalCopy: string;
   baseFeedback: RewriteFeedbackItem[];
   chain: RewriteIteration[];
   onChainChange: (iterations: RewriteIteration[]) => void;
-  onViewPrompt: (feedback: RewriteFeedbackItem[], content: string | undefined, title: string) => void;
+  onClearChain?: () => void;
   autoStart?: boolean;
 }) {
   const [status, setStatus] = useState<"idle" | "running" | "error">("idle");
   const [stage, setStage] = useState<"rewriting" | "regrading" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showOriginal, setShowOriginal] = useState(false);
+  // Which iteration cards are expanded (collapsed by default so the whole chain
+  // is scannable without scrolling).
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [confirmClear, setConfirmClear] = useState(false);
+  const toggleExpanded = (idx: number) =>
+    setExpanded((prev) => {
+      const n = new Set(prev);
+      if (n.has(idx)) n.delete(idx); else n.add(idx);
+      return n;
+    });
+
+  // Which iteration's step-by-step flow to show in the RewriteFlowModal.
+  const [flowFor, setFlowFor] = useState<number | null>(null);
+  const flowData: RewriteFlowData | null = useMemo(() => {
+    if (flowFor === null || !chain[flowFor]) return null;
+    const it = chain[flowFor];
+    const inputCopy = flowFor === 0 ? originalCopy : chain[flowFor - 1].content;
+    const inputFeedback = flowFor === 0 ? baseFeedback : chain[flowFor - 1].grades;
+    return {
+      title: `Rewrite flow · #${flowFor + 1}`,
+      originalLabel: flowFor === 0 ? "Original copy" : `Previous copy (rewrite #${flowFor})`,
+      originalCopy: inputCopy,
+      request: {
+        generation_id: generationId,
+        mode: "rewrite",
+        feedback: inputFeedback,
+        content: flowFor === 0 ? undefined : inputCopy,
+        suite_id: suiteId,
+        thesis: it.thesis,
+      },
+      thesis: it.thesis,
+      resultCopy: it.content,
+    };
+  }, [flowFor, chain, originalCopy, baseFeedback, generationId, suiteId]);
 
   // What the NEXT rewrite builds on: the latest link's copy + scores, or the
   // original copy + original suite-run scores when the chain is empty.
@@ -91,7 +124,7 @@ export function RewriteDialog({
     setError(null);
     try {
       setStage("rewriting");
-      const { improved_content } = await evalsApi.rewrite(generationId, nextFeedback, nextBaseContent);
+      const { improved_content, thesis } = await evalsApi.rewrite(generationId, nextFeedback, nextBaseContent, suiteId);
 
       setStage("regrading");
       const grades = await Promise.all(
@@ -108,7 +141,9 @@ export function RewriteDialog({
         }),
       );
 
-      onChainChange([...chain, { content: improved_content, created_at: new Date().toISOString(), grades }]);
+      const newIndex = chain.length; // index of the iteration we're appending
+      onChainChange([...chain, { content: improved_content, created_at: new Date().toISOString(), grades, thesis }]);
+      setExpanded(new Set([newIndex])); // focus the freshest result, collapse the rest
       setStatus("idle");
       setStage(null);
     } catch (err) {
@@ -128,12 +163,16 @@ export function RewriteDialog({
   // Export the whole rewrite chain as JSON, including the exact rewrite prompt
   // (chat chain) that produced each link and its re-grade scores.
   function downloadChain() {
-    // The feedback + base copy that drove each link (link 0 uses the baseline).
+    // The feedback + base copy that drove each link (link 0 uses the baseline),
+    // plus the suite + the iteration's stored thesis so the reconstructed chain
+    // includes the orchestration prompt and thesis that actually ran.
     const promptFor = (i: number) => evalsApi.messages({
       generation_id: generationId,
       mode: "rewrite",
       feedback: i === 0 ? baseFeedback : chain[i - 1].grades,
       content: i === 0 ? undefined : chain[i - 1].content,
+      suite_id: suiteId,
+      thesis: chain[i].thesis,
     }).then((r) => r.messages);
 
     toast.promise(
@@ -142,12 +181,16 @@ export function RewriteDialog({
           kind: "rewrite_chain",
           exported_at: new Date().toISOString(),
           generation_id: generationId,
+          suite_id: suiteId ?? null,
           model: model ?? null,
           original_copy: originalCopy,
           baseline_grades: baseFeedback,
           iterations: chain.map((it, i) => ({
             index: i + 1,
+            // The full reconstructed chat chain: orchestration prompt → thesis →
+            // rewrite prompt (the rewrite prompt embeds the thesis below).
             rewrite_prompt: prompts[i],
+            orchestration_thesis: it.thesis ?? null,
             content: it.content,
             created_at: it.created_at,
             grades: it.grades,
@@ -191,34 +234,62 @@ export function RewriteDialog({
             )}
           </div>
 
-          {/* the chain */}
+          {/* the chain — each rewrite is a collapsible card so the whole chain
+              is scannable without scrolling; expand one to see its detail */}
           {chain.map((it, idx) => {
             const prev = idx === 0 ? baseFeedback : chain[idx - 1].grades;
             const prevById = mapById(prev);
-            const feedbackUsed = idx === 0 ? baseFeedback : chain[idx - 1].grades;
-            const baseContentUsed = idx === 0 ? undefined : chain[idx - 1].content;
+            const isOpen = expanded.has(idx);
+            const passCount = it.grades.filter((g) => String(g.score) === String(g.desired_score)).length;
             return (
-              <div key={idx} className="border rounded-md p-3 space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-                    Rewrite #{idx + 1}
-                  </p>
-                  <span className="text-[10px] text-muted-foreground">{new Date(it.created_at).toLocaleString()}</span>
-                </div>
-                {/* rewrite first, then its evaluation — reads chronologically */}
-                <pre className="whitespace-pre-wrap break-words rounded-md border bg-green-50/50 border-green-200 p-2 text-sm leading-relaxed font-sans">
-                  {it.content}
-                </pre>
-                <Button
-                  size="sm" variant="ghost"
-                  className="h-6 px-1.5 text-[11px] gap-1 text-muted-foreground hover:text-foreground"
-                  onClick={() => onViewPrompt(feedbackUsed, baseContentUsed, `Rewrite prompt · #${idx + 1}`)}
+              <div key={idx} className="border rounded-md">
+                {/* header row — click to expand/collapse */}
+                <button
+                  className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/40 transition-colors"
+                  onClick={() => toggleExpanded(idx)}
+                  aria-expanded={isOpen}
                 >
-                  <MessageSquare className="h-3 w-3" /> View rewrite prompt
-                </Button>
-                <div className="space-y-2.5 border-t pt-2">
-                  {it.grades.map((g) => <GradeRow key={g.criterion_id} grade={g} prev={prevById.get(g.criterion_id)} />)}
-                </div>
+                  {isOpen ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+                  <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground shrink-0">Rewrite #{idx + 1}</span>
+                  <span className={`text-[10px] font-medium shrink-0 ${passCount === it.grades.length ? "text-green-600" : "text-amber-600"}`}>
+                    {passCount}/{it.grades.length} pass
+                  </span>
+                  {!isOpen && (
+                    <span className="flex-1 min-w-0 truncate text-xs text-muted-foreground">{it.content}</span>
+                  )}
+                  <span className="ml-auto text-[10px] text-muted-foreground shrink-0">{new Date(it.created_at).toLocaleString()}</span>
+                </button>
+
+                {isOpen && (
+                  <div className="px-3 pb-3 space-y-2 border-t">
+                    {/* rewrite first, then its evaluation — reads chronologically */}
+                    <pre className="mt-2 whitespace-pre-wrap break-words rounded-md border bg-green-50/50 border-green-200 p-2 text-sm leading-relaxed font-sans">
+                      {it.content}
+                    </pre>
+                    {it.thesis && (
+                      <details className="group">
+                        <summary className="cursor-pointer list-none flex items-center gap-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground hover:text-foreground">
+                          <ChevronRight className="h-3 w-3 group-open:hidden" />
+                          <ChevronDown className="h-3 w-3 hidden group-open:inline" />
+                          Orchestration thesis
+                        </summary>
+                        <pre className="mt-1 whitespace-pre-wrap break-words rounded-md border bg-amber-50/50 border-amber-200 p-2 text-xs leading-relaxed font-sans">
+                          {it.thesis}
+                        </pre>
+                      </details>
+                    )}
+                    <Button
+                      size="sm" variant="ghost"
+                      className="h-6 px-1.5 text-[11px] gap-1 text-muted-foreground hover:text-foreground"
+                      onClick={() => setFlowFor(idx)}
+                    >
+                      <MessageSquare className="h-3 w-3" /> View flow
+                    </Button>
+                    <div className="space-y-2.5 border-t pt-2">
+                      {it.grades.map((g) => <GradeRow key={g.criterion_id} grade={g} prev={prevById.get(g.criterion_id)} />)}
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -245,21 +316,43 @@ export function RewriteDialog({
           </Button>
           <Button
             size="sm" variant="outline" className="gap-1.5"
-            disabled={baseFeedback.length === 0}
-            onClick={() => onViewPrompt(nextFeedback, nextBaseContent, `Next rewrite prompt · #${chain.length + 1}`)}
-          >
-            <MessageSquare className="h-3.5 w-3.5" /> View next prompt
-          </Button>
-          <Button
-            size="sm" variant="outline" className="gap-1.5"
             disabled={chain.length === 0}
             onClick={downloadChain}
             title="Download the full rewrite chain (chat + scores) as JSON"
           >
             <Download className="h-3.5 w-3.5" /> Download chain
           </Button>
+          {onClearChain && (
+            confirmClear ? (
+              <div className="flex items-center gap-1.5 ml-auto">
+                <span className="text-xs text-muted-foreground">Clear all {chain.length} rewrite{chain.length === 1 ? "" : "s"}?</span>
+                <Button
+                  size="sm" variant="destructive" className="gap-1.5"
+                  onClick={() => { onClearChain(); setExpanded(new Set()); setConfirmClear(false); }}
+                >
+                  <Trash2 className="h-3.5 w-3.5" /> Confirm
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setConfirmClear(false)}>Cancel</Button>
+              </div>
+            ) : (
+              <Button
+                size="sm" variant="ghost" className="gap-1.5 ml-auto text-muted-foreground hover:text-destructive"
+                disabled={chain.length === 0 || status === "running"}
+                onClick={() => setConfirmClear(true)}
+                title="Delete this rewrite chain so it can be rebuilt from scratch"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Clear chain
+              </Button>
+            )
+          )}
         </div>
       </DialogContent>
+
+      <RewriteFlowModal
+        open={flowFor !== null}
+        onOpenChange={(v) => { if (!v) setFlowFor(null); }}
+        flow={flowData}
+      />
     </Dialog>
   );
 }
