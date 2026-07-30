@@ -122,6 +122,7 @@ SUITES_COLUMNS = [
     ("name",        "NVARCHAR(500)", False),
     ("description", "NVARCHAR(MAX)", True),
     ("active",      "BIT",           False),
+    ("rewrite_orchestration_prompt", "NVARCHAR(MAX)", True),
     ("created_at",  "DATETIME2(7)",  False),
     ("updated_at",  "DATETIME2(7)",  False),
 ]

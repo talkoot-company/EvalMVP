@@ -140,6 +140,24 @@ export async function createMssqlStore({ adonet, database, prefix }) {
      );`
   );
 
+  // Self-provision the suite_rewrite_chains table (aggregate-rewrite iterations
+  // per suite+generation). Keyed by "<suite_id>::<generation_id>".
+  await q(
+    `IF OBJECT_ID(N'[dbo].[${prefix}suite_rewrite_chains]', N'U') IS NULL
+     CREATE TABLE [dbo].[${prefix}suite_rewrite_chains] (
+       id             NVARCHAR(300) NOT NULL PRIMARY KEY,
+       suite_id       NVARCHAR(200) NOT NULL,
+       generation_id  NVARCHAR(64)  NOT NULL,
+       data           NVARCHAR(MAX) NOT NULL,
+       created_at     DATETIME2(7)  NOT NULL,
+       updated_at     DATETIME2(7)  NOT NULL
+     );`
+  );
+  await q(
+    `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_${prefix}suite_rewrite_suite')
+     CREATE INDEX [idx_${prefix}suite_rewrite_suite] ON [dbo].[${prefix}suite_rewrite_chains](suite_id);`
+  );
+
   // Self-provision the generations.product_json column (persisted extracted
   // product record). db/setup_temp_tables.py doesn't create it.
   await q(
@@ -185,9 +203,16 @@ export async function createMssqlStore({ adonet, database, prefix }) {
        name         NVARCHAR(500)  NOT NULL,
        description  NVARCHAR(MAX)  NULL,
        active       BIT            NOT NULL,
+       rewrite_orchestration_prompt NVARCHAR(MAX) NULL,
        created_at   DATETIME2(7)   NOT NULL,
        updated_at   DATETIME2(7)   NOT NULL
      );`
+  );
+  // Self-provision the per-suite rewrite orchestration prompt column on existing
+  // tables (the CREATE above only covers fresh installs).
+  await q(
+    `IF COL_LENGTH(N'[dbo].[${prefix}suites]', N'rewrite_orchestration_prompt') IS NULL
+     ALTER TABLE [dbo].[${prefix}suites] ADD rewrite_orchestration_prompt NVARCHAR(MAX) NULL;`
   );
   await q(
     `IF OBJECT_ID(N'[dbo].[${prefix}suite_criteria]', N'U') IS NULL
@@ -226,6 +251,7 @@ export async function createMssqlStore({ adonet, database, prefix }) {
   );
 
   const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}`;
+  const suiteRewriteKey = (suiteId, generationId) => `${suiteId}::${generationId}`;
 
   const insertRow = async (base, obj) => {
     const o = coerceWrite(base, obj);
@@ -393,6 +419,31 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     listChainGenerationIds: async (criterionId) =>
       (await q(`SELECT generation_id FROM ${tbl("refinement_chains")} WHERE criterion_id=@p0`, [criterionId]))
         .map((r) => r.generation_id),
+
+    // suite rewrite chains (aggregate-rewrite iterations per suite+generation)
+    getSuiteRewriteChain: async (suiteId, generationId) => {
+      const row = await one(`SELECT * FROM ${tbl("suite_rewrite_chains")} WHERE id=@p0`, [suiteRewriteKey(suiteId, generationId)]);
+      if (!row) return null;
+      return { ...row, data: typeof row.data === "string" ? JSON.parse(row.data) : row.data };
+    },
+    saveSuiteRewriteChain: async (suiteId, generationId, data) => {
+      const id = suiteRewriteKey(suiteId, generationId);
+      const now = new Date();
+      const existing = await one(`SELECT created_at FROM ${tbl("suite_rewrite_chains")} WHERE id=@p0`, [id]);
+      const createdAt = existing ? existing.created_at : now;
+      await q(`DELETE FROM ${tbl("suite_rewrite_chains")} WHERE id=@p0`, [id]);
+      await q(
+        `INSERT INTO ${tbl("suite_rewrite_chains")}
+           (id, suite_id, generation_id, data, created_at, updated_at)
+         VALUES (@p0,@p1,@p2,@p3,@p4,@p5)`,
+        [id, suiteId, generationId, JSON.stringify(data), createdAt, now]
+      );
+    },
+    deleteSuiteRewriteChain: (suiteId, generationId) =>
+      q(`DELETE FROM ${tbl("suite_rewrite_chains")} WHERE id=@p0`, [suiteRewriteKey(suiteId, generationId)]),
+    listSuiteRewriteChains: async (suiteId) =>
+      (await q(`SELECT generation_id, data FROM ${tbl("suite_rewrite_chains")} WHERE suite_id=@p0`, [suiteId]))
+        .map((r) => ({ generation_id: r.generation_id, data: typeof r.data === "string" ? JSON.parse(r.data) : r.data })),
 
     // suites (+ suite_criteria junction; mirrors the type_mapping pattern)
     listSuites: () => q(`SELECT * FROM ${tbl("suites")} ORDER BY name`),

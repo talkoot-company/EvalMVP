@@ -34,10 +34,10 @@ import {
 const PAGE_SIZE = 10;
 const CONCURRENCY = 6;
 
-// --- localStorage-backed rewrite chains, keyed per suite ----------------------
-// Shape: { [generationId]: RewriteIteration[] }. Older single-rewrite entries
-// (a bare object, not an array) are ignored so they don't crash the chain view.
-function loadRewrites(suiteId: string): Record<string, RewriteIteration[]> {
+// Legacy localStorage rewrite chains, keyed per suite: { [generationId]:
+// RewriteIteration[] }. These are now persisted in the DB; this reader only
+// exists to migrate any pre-existing browser-local chains up on first load.
+function loadLocalRewrites(suiteId: string): Record<string, RewriteIteration[]> {
   try {
     const raw = localStorage.getItem(`suite_rewrites:${suiteId}`);
     if (!raw) return {};
@@ -50,9 +50,6 @@ function loadRewrites(suiteId: string): Record<string, RewriteIteration[]> {
   } catch {
     return {};
   }
-}
-function saveRewrites(suiteId: string, map: Record<string, RewriteIteration[]>) {
-  localStorage.setItem(`suite_rewrites:${suiteId}`, JSON.stringify(map));
 }
 
 // --- localStorage-backed test set (generation ids), keyed per suite ----------
@@ -127,8 +124,9 @@ export function SuiteTestPanel({
   const [isRunning, setIsRunning] = useState(false);
   const [selectedCell, setSelectedCell] = useState<{ genId: string; critId: string } | null>(null);
 
-  // rewrite + prompt-inspection state
-  const [rewrites, setRewrites] = useState<Record<string, RewriteIteration[]>>(() => loadRewrites(suiteId));
+  // rewrite + prompt-inspection state. `rewrites` is DB-backed (loaded via the
+  // query below); it starts empty and is populated once the chains load.
+  const [rewrites, setRewrites] = useState<Record<string, RewriteIteration[]>>({});
   const [rewriteFor, setRewriteFor] = useState<string | null>(null);
   const [rewriteAutoStart, setRewriteAutoStart] = useState(false);
   const [viewGenFor, setViewGenFor] = useState<string | null>(null);
@@ -309,11 +307,46 @@ export function SuiteTestPanel({
     [ranCriteria, results],
   );
 
+  // Load the suite's rewrite chains from the DB (source of truth), then migrate
+  // any browser-local chains that aren't in the DB yet (one-time, idempotent).
+  const { data: dbRewriteChains } = useQuery({
+    queryKey: ["suite-rewrite-chains", suiteId],
+    queryFn: () => evalsApi.suiteRewriteChain.list(suiteId),
+    staleTime: 1000 * 60 * 5,
+  });
+  useEffect(() => {
+    if (!dbRewriteChains) return;
+    const map: Record<string, RewriteIteration[]> = {};
+    for (const row of dbRewriteChains) map[row.generation_id] = row.data?.iterations ?? [];
+    // Migrate localStorage-only chains up to the DB, then adopt them locally.
+    const local = loadLocalRewrites(suiteId);
+    for (const [genId, iterations] of Object.entries(local)) {
+      if (iterations.length && !(genId in map)) {
+        map[genId] = iterations;
+        evalsApi.suiteRewriteChain.save(suiteId, genId, { iterations }).catch((e) =>
+          console.error(`Migrating rewrite chain ${genId} to DB failed:`, e));
+      }
+    }
+    setRewrites(map);
+  }, [dbRewriteChains, suiteId]);
+
   const persistChain = (genId: string, iterations: RewriteIteration[]) => {
+    setRewrites((prev) => ({ ...prev, [genId]: iterations }));
+    evalsApi.suiteRewriteChain.save(suiteId, genId, { iterations }).catch((e) =>
+      toast.error(`Failed to save rewrite chain: ${e instanceof Error ? e.message : String(e)}`));
+  };
+
+  // Wipe a generation's rewrite chain from the DB so it can be rebuilt from scratch.
+  const clearChain = (genId: string) => {
     setRewrites((prev) => {
-      const next = { ...prev, [genId]: iterations };
-      saveRewrites(suiteId, next);
+      const next = { ...prev };
+      delete next[genId];
       return next;
+    });
+    toast.promise(evalsApi.suiteRewriteChain.remove(suiteId, genId), {
+      loading: "Clearing rewrite chain…",
+      success: "Rewrite chain cleared",
+      error: (e) => `Failed to clear chain: ${e instanceof Error ? e.message : String(e)}`,
     });
   };
 
@@ -651,16 +684,14 @@ export function SuiteTestPanel({
           open={!!rewriteFor}
           onOpenChange={(v) => { if (!v) { setRewriteFor(null); setRewriteAutoStart(false); } }}
           generationId={rewriteFor}
+          suiteId={suiteId}
           model={genCache.get(rewriteFor)?.model}
           originalCopy={genCache.get(rewriteFor)?.response_content ?? ""}
           baseFeedback={feedbackForGeneration(rewriteFor)}
           chain={rewrites[rewriteFor] ?? []}
           autoStart={rewriteAutoStart}
           onChainChange={(iterations) => persistChain(rewriteFor, iterations)}
-          onViewPrompt={(feedback, content, title) => setChatRequest({
-            request: { generation_id: rewriteFor, mode: "rewrite", feedback, content },
-            title,
-          })}
+          onClearChain={() => clearChain(rewriteFor)}
         />
       )}
 

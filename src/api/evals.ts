@@ -78,6 +78,26 @@ export interface RefinementChain {
   updated_at: string;
 }
 
+// One link in a SUITE rewrite chain: the rewritten copy plus its re-grade against
+// every selected criterion (multi-criterion, unlike the single-criterion
+// RefinementChain above), and the orchestration thesis that shaped it.
+export interface RewriteIteration {
+  content: string;
+  created_at: string;
+  grades: RewriteFeedbackItem[];
+  thesis?: string;
+}
+
+export interface SuiteRewriteChainData {
+  iterations: RewriteIteration[];
+}
+
+// A row from GET /api/suite/rewrite-chains (one per generation in the suite).
+export interface SuiteRewriteChainRow {
+  generation_id: string;
+  data: SuiteRewriteChainData;
+}
+
 export interface PostEditRequest {
   generation_id: string;
   criterion_name: string;
@@ -122,6 +142,11 @@ export interface ChatMessagesRequest {
   evidence?: string[];
   // Only used for the rewrite chain (the aggregated per-criterion feedback).
   feedback?: RewriteFeedbackItem[];
+  // Rewrite chain: the suite whose orchestration prompt precedes the rewrite, and
+  // the thesis that orchestration produced (stored per iteration) so the
+  // reconstructed chain shows the exact prompt+thesis that ran.
+  suite_id?: string;
+  thesis?: string;
 }
 
 export const evalsApi = {
@@ -147,11 +172,13 @@ export const evalsApi = {
     }),
 
   // Rewrite a generation's copy using the aggregated feedback from every
-  // criterion it was evaluated against.
-  rewrite: (generation_id: string, feedback: RewriteFeedbackItem[], content?: string): Promise<{ improved_content: string }> =>
+  // criterion it was evaluated against. `suite_id` selects which suite's rewrite
+  // orchestration prompt drives the coherence-thesis step (default otherwise).
+  // Returns the improved copy plus the thesis the orchestration produced.
+  rewrite: (generation_id: string, feedback: RewriteFeedbackItem[], content?: string, suite_id?: string): Promise<{ improved_content: string; thesis?: string }> =>
     apiFetch("/rewrite", {
       method: "POST",
-      body: JSON.stringify({ generation_id, feedback, content }),
+      body: JSON.stringify({ generation_id, feedback, content, suite_id }),
     }),
 
   // Re-grade arbitrary content (e.g. the post-edited copy) against a criterion,
@@ -172,5 +199,18 @@ export const evalsApi = {
       apiFetch(`/eval/chain?criterion_id=${encodeURIComponent(criterionId)}&generation_id=${encodeURIComponent(generationId)}`, { method: "DELETE" }),
     generationIds: (criterionId: string): Promise<string[]> =>
       apiFetch(`/eval/chains?criterion_id=${encodeURIComponent(criterionId)}`),
+  },
+
+  // Suite rewrite chains (aggregate-rewrite iterations, persisted per suite+generation).
+  suiteRewriteChain: {
+    list: (suiteId: string): Promise<SuiteRewriteChainRow[]> =>
+      apiFetch(`/suite/rewrite-chains?suite_id=${encodeURIComponent(suiteId)}`),
+    save: (suiteId: string, generationId: string, data: SuiteRewriteChainData): Promise<unknown> =>
+      apiFetch("/suite/rewrite-chain", {
+        method: "PUT",
+        body: JSON.stringify({ suite_id: suiteId, generation_id: generationId, data }),
+      }),
+    remove: (suiteId: string, generationId: string): Promise<void> =>
+      apiFetch(`/suite/rewrite-chain?suite_id=${encodeURIComponent(suiteId)}&generation_id=${encodeURIComponent(generationId)}`, { method: "DELETE" }),
   },
 };

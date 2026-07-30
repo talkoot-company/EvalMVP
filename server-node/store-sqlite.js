@@ -69,11 +69,20 @@ const BASE_SCHEMA = `
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS suite_rewrite_chains (
+    id             TEXT PRIMARY KEY,   -- "<suite_id>::<generation_id>"
+    suite_id       TEXT NOT NULL,
+    generation_id  TEXT NOT NULL,
+    data           TEXT NOT NULL,      -- JSON: { iterations: RewriteIteration[] }
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS suites (
     id           TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     description  TEXT,
     active       INTEGER NOT NULL DEFAULT 1,
+    rewrite_orchestration_prompt TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
   );
@@ -106,9 +115,11 @@ const BASE_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_generations_created_at ON generations (created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_generations_model ON generations (model);
   CREATE INDEX IF NOT EXISTS idx_refinement_criterion ON refinement_chains (criterion_id);
+  CREATE INDEX IF NOT EXISTS idx_suite_rewrite_suite ON suite_rewrite_chains (suite_id);
 `;
 
 const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}`;
+const suiteRewriteKey = (suiteId, generationId) => `${suiteId}::${generationId}`;
 
 const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"], suites: ["active"] };
 const DATE_COLS = { criteria: ["created_at", "updated_at", "uploaded_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"], prompt_templates: ["created_at", "updated_at"], criteria_uploads: ["uploaded_at"] };
@@ -180,6 +191,11 @@ export function createSqliteStore(dbPath) {
   }
   try {
     db.exec("ALTER TABLE generations ADD COLUMN dataset TEXT");
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec("ALTER TABLE suites ADD COLUMN rewrite_orchestration_prompt TEXT");
   } catch {
     /* column already exists */
   }
@@ -335,6 +351,27 @@ export function createSqliteStore(dbPath) {
       db.prepare("DELETE FROM refinement_chains WHERE id=?").run(chainKey(criterionId, generationId)),
     listChainGenerationIds: (criterionId) =>
       db.prepare("SELECT generation_id FROM refinement_chains WHERE criterion_id=?").all(criterionId).map((r) => r.generation_id),
+
+    // suite rewrite chains (aggregate-rewrite iterations per suite+generation)
+    getSuiteRewriteChain: (suiteId, generationId) => {
+      const row = db.prepare("SELECT * FROM suite_rewrite_chains WHERE id=?").get(suiteRewriteKey(suiteId, generationId));
+      return row ? { ...row, data: JSON.parse(row.data) } : null;
+    },
+    saveSuiteRewriteChain: (suiteId, generationId, data) => {
+      const id = suiteRewriteKey(suiteId, generationId);
+      const now = new Date().toISOString();
+      const existing = db.prepare("SELECT created_at FROM suite_rewrite_chains WHERE id=?").get(id);
+      db.prepare(
+        `INSERT OR REPLACE INTO suite_rewrite_chains
+           (id, suite_id, generation_id, data, created_at, updated_at)
+         VALUES (?,?,?,?,?,?)`
+      ).run(id, suiteId, generationId, JSON.stringify(data), existing?.created_at ?? now, now);
+    },
+    deleteSuiteRewriteChain: (suiteId, generationId) =>
+      db.prepare("DELETE FROM suite_rewrite_chains WHERE id=?").run(suiteRewriteKey(suiteId, generationId)),
+    listSuiteRewriteChains: (suiteId) =>
+      db.prepare("SELECT generation_id, data FROM suite_rewrite_chains WHERE suite_id=?").all(suiteId)
+        .map((r) => ({ generation_id: r.generation_id, data: JSON.parse(r.data) })),
 
     // suites (+ suite_criteria junction; mirrors the type_mapping pattern)
     listSuites: () => db.prepare("SELECT * FROM suites ORDER BY name").all(),

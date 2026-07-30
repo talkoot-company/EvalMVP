@@ -102,6 +102,9 @@ export interface Suite {
   name: string;
   description: string | null;
   active: boolean;
+  // Per-suite prompt that turns the criteria feedback into a coherence thesis
+  // before the rewrite. null → the rewrite uses the built-in default.
+  rewrite_orchestration_prompt: string | null;
   criteria_ids: string[];
   created_at: string;
   updated_at: string;
