@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { useGenerations, useGenerationModels, useGenerationDatasets } from "@/hooks/useGenerations";
+import { useGenerations, useGenerationModels, useGenerationDatasets, useLengthPercentiles } from "@/hooks/useGenerations";
 import type { Generation } from "@/api/generations";
 import { datasetLabel } from "@/lib/datasets";
 import { Input } from "@/components/ui/input";
@@ -48,7 +48,7 @@ function inferType(systemPrompt: string | null): ContentType {
   if (sp.includes("bullet")) return "Bullets";
   if (sp.includes("sustainab")) return "Sustainability";
   if (sp.includes("extract") || sp.includes("lookup") || sp.includes("identify")) return "Extraction";
-  if (sp.includes("title") || sp.includes("subhead") || sp.includes("naming")) return "Title";
+  if (sp.includes("title") || sp.includes("subhead") || sp.includes("headline") || sp.includes("naming")) return "Title";
   if (sp.includes("description") || sp.includes("copywriter") || sp.includes("copy")) return "Description";
   return "Other";
 }
@@ -171,18 +171,37 @@ const GenerationsPage = () => {
   const [modelFilter, setModelFilter] = useState("all");
   const [datasetFilter, setDatasetFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState<ContentType | "all">("all");
+  const [lengthBand, setLengthBand] = useState("all");
   const [validProductDataOnly, setValidProductDataOnly] = useState(true);
   const [page, setPage] = useState(0);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const { data: models = [] } = useGenerationModels();
   const { data: datasets = [] } = useGenerationDatasets();
+  // Length-band cutoffs (chars) from p10/p25/p50/p75/p90 over Description+Title,
+  // scoped to the selected dataset so bands reflect the data being viewed.
+  const { data: pctl } = useLengthPercentiles({ dataset: datasetFilter });
+  const lengthBands = useMemo(() => {
+    if (!pctl || !pctl.count) return [];
+    const { p10, p25, p50, p75, p90 } = pctl;
+    return [
+      { value: "lte_p10", label: `Shortest 10% (≤${p10})`, min: undefined, max: p10 },
+      { value: "p10_25", label: `p10–p25 (${p10}–${p25})`, min: p10, max: p25 },
+      { value: "p25_50", label: `p25–p50 (${p25}–${p50})`, min: p25, max: p50 },
+      { value: "p50_75", label: `p50–p75 (${p50}–${p75})`, min: p50, max: p75 },
+      { value: "p75_90", label: `p75–p90 (${p75}–${p90})`, min: p75, max: p90 },
+      { value: "gte_p90", label: `Longest 10% (≥${p90})`, min: p90, max: undefined },
+    ];
+  }, [pctl]);
+  const activeBand = lengthBands.find((b) => b.value === lengthBand);
 
   const { data, isLoading } = useGenerations({
     search: debouncedSearch,
     model: modelFilter === "all" ? "" : modelFilter,
     dataset: datasetFilter,
     validProductData: validProductDataOnly,
+    minLen: activeBand?.min,
+    maxLen: activeBand?.max,
     limit: PAGE_SIZE,
     offset: page * PAGE_SIZE,
   });
@@ -258,7 +277,7 @@ const GenerationsPage = () => {
         </Select>
 
         {datasets.length > 0 && (
-          <Select value={datasetFilter} onValueChange={(v) => { setDatasetFilter(v); setPage(0); }}>
+          <Select value={datasetFilter} onValueChange={(v) => { setDatasetFilter(v); setLengthBand("all"); setPage(0); }}>
             <SelectTrigger className="w-44">
               <SelectValue placeholder="All datasets" />
             </SelectTrigger>
@@ -266,6 +285,20 @@ const GenerationsPage = () => {
               <SelectItem value="all">All datasets</SelectItem>
               {datasets.map((d) => (
                 <SelectItem key={d} value={d}>{datasetLabel(d)}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+
+        {lengthBands.length > 0 && (
+          <Select value={lengthBand} onValueChange={(v) => { setLengthBand(v); setPage(0); }}>
+            <SelectTrigger className="w-56" title="Filter by response length (characters). Bands are the p10/p25/p50/p75/p90 of Description + Title copy.">
+              <SelectValue placeholder="Any length" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Any length</SelectItem>
+              {lengthBands.map((b) => (
+                <SelectItem key={b.value} value={b.value}>{b.label}</SelectItem>
               ))}
             </SelectContent>
           </Select>

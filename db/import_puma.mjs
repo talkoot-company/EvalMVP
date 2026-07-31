@@ -31,18 +31,17 @@ import sql from "mssql";
 import { parseAdonet, normalizeServerEndpoint } from "../server-node/store-mssql.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const DATA_DIR = path.join(ROOT, "data", "puma_generations");
-
 // ---------------------------------------------------------------------------
 // CLI args
 // ---------------------------------------------------------------------------
 function parseArgs(argv) {
-  const out = { limit: 3000, dataset: "puma", dryRun: false, prefix: process.env.TABLE_PREFIX || "temp_Brian_", database: process.env.MSSQL_DATABASE || "dev-golfcarts" };
+  const out = { limit: 3000, dataset: "puma", dataDir: "data/puma_generations", dryRun: false, prefix: process.env.TABLE_PREFIX || "temp_Brian_", database: process.env.MSSQL_DATABASE || "dev-golfcarts" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") out.dryRun = true;
     else if (a === "--limit") out.limit = Number(argv[++i]);
     else if (a === "--dataset") out.dataset = argv[++i];
+    else if (a === "--data-dir") out.dataDir = argv[++i];
     else if (a === "--prefix") out.prefix = argv[++i];
     else if (a === "--database") out.database = argv[++i];
     else { console.error(`Unknown arg: ${a}`); process.exit(2); }
@@ -51,6 +50,7 @@ function parseArgs(argv) {
   return out;
 }
 const args = parseArgs(process.argv.slice(2));
+const DATA_DIR = path.isAbsolute(args.dataDir) ? args.dataDir : path.join(ROOT, args.dataDir);
 
 // ---------------------------------------------------------------------------
 // Connection string (raw file read — handles '#' / '$$' in the password)
@@ -169,7 +169,7 @@ async function main() {
 
   const tbl = `[dbo].[${args.prefix}generations]`;
   console.log("=".repeat(70));
-  console.log("PUMA generation import");
+  console.log(`Generation import — dataset '${args.dataset}' from ${args.dataDir}`);
   console.log(`  Server   : ${config.server}${config.port ? ":" + config.port : ""}`);
   console.log(`  Database : ${config.database}`);
   console.log(`  Table    : ${args.prefix}generations`);
@@ -241,7 +241,7 @@ async function main() {
         last_user_message: lastUser || null,
         few_shot_count: fewShot,
         temperature: req.temperature ?? null,
-        max_tokens: req.max_tokens ?? null,
+        max_tokens: req.max_tokens ?? req.max_completion_tokens ?? null,
         response_content: info.response_content || null,
         prompt_tokens: info.prompt_tokens ?? null,
         completion_tokens: info.completion_tokens ?? null,

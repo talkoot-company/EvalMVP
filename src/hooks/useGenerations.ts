@@ -9,7 +9,7 @@ export function useGenerationCountsByType() {
   });
 }
 
-export function useGenerations(params: { search?: string; model?: string; dataset?: string; limit?: number; offset?: number; validProductData?: boolean } = {}) {
+export function useGenerations(params: { search?: string; model?: string; dataset?: string; limit?: number; offset?: number; validProductData?: boolean; minLen?: number; maxLen?: number } = {}) {
   return useQuery({
     queryKey: ["generations", params],
     queryFn: () => generationsApi.list(params),
@@ -37,6 +37,14 @@ export function useGenerationDatasets() {
   return useQuery({
     queryKey: ["generations", "datasets"],
     queryFn: generationsApi.datasets,
+    staleTime: 1000 * 60 * 10,
+  });
+}
+
+export function useLengthPercentiles(params: { dataset?: string; genTypes?: string[] } = {}) {
+  return useQuery({
+    queryKey: ["generations", "length-percentiles", params],
+    queryFn: () => generationsApi.lengthPercentiles(params),
     staleTime: 1000 * 60 * 10,
   });
 }

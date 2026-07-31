@@ -135,6 +135,7 @@ const TYPE_CASE_SQL = `
         OR instr(lower(system_prompt), 'identify') > 0 THEN 'Extraction'
       WHEN instr(lower(system_prompt), 'title') > 0
         OR instr(lower(system_prompt), 'subhead') > 0
+        OR instr(lower(system_prompt), 'headline') > 0
         OR instr(lower(system_prompt), 'naming') > 0 THEN 'Title'
       WHEN instr(lower(system_prompt), 'description') > 0
         OR instr(lower(system_prompt), 'copywriter') > 0
@@ -265,7 +266,7 @@ export function createSqliteStore(dbPath) {
       db.prepare("SELECT * FROM criteria WHERE LOWER(criteria_name)=LOWER(?)").get(name) || null,
 
     // generations
-    listGenerations: ({ search, model, dataset, limit, offset, validProductData, genTypes }) => {
+    listGenerations: ({ search, model, dataset, limit, offset, validProductData, genTypes, minLen, maxLen }) => {
       const cond = [], params = [];
       if (search) {
         cond.push("(last_user_message LIKE ? OR response_content LIKE ? OR system_prompt LIKE ?)");
@@ -279,6 +280,9 @@ export function createSqliteStore(dbPath) {
         cond.push(`gen_type IN (${genTypes.map(() => "?").join(",")})`);
         params.push(...genTypes);
       }
+      // Response-length band (character count of the generated copy).
+      if (minLen != null) { cond.push("LENGTH(response_content) >= ?"); params.push(minLen); }
+      if (maxLen != null) { cond.push("LENGTH(response_content) < ?"); params.push(maxLen); }
       const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
       const total = db.prepare(`SELECT COUNT(*) AS n FROM generations ${where}`).get(...params).n;
       const rows = db.prepare(
@@ -291,6 +295,19 @@ export function createSqliteStore(dbPath) {
       db.prepare("SELECT DISTINCT model FROM generations WHERE model IS NOT NULL ORDER BY model").all().map((r) => r.model),
     listGenerationDatasets: () =>
       db.prepare("SELECT DISTINCT dataset FROM generations WHERE dataset IS NOT NULL ORDER BY dataset").all().map((r) => r.dataset),
+    // p10/p25/p50/p75/p90 of response length (chars) over the given types (default
+    // Description+Title), optionally scoped to a dataset — used to seed the length filter bands.
+    getLengthPercentiles: ({ dataset, genTypes } = {}) => {
+      const cond = ["response_content IS NOT NULL"], params = [];
+      if (dataset && dataset !== "all") { cond.push("dataset=?"); params.push(dataset); }
+      const types = genTypes && genTypes.length ? genTypes : ["Description", "Title"];
+      cond.push(`gen_type IN (${types.map(() => "?").join(",")})`);
+      params.push(...types);
+      const lens = db.prepare(`SELECT LENGTH(response_content) AS n FROM generations WHERE ${cond.join(" AND ")}`)
+        .all(...params).map((r) => r.n).filter((n) => n != null).sort((a, b) => a - b);
+      const p = (q) => (lens.length ? lens[Math.min(lens.length - 1, Math.floor(q * lens.length))] : 0);
+      return { count: lens.length, p10: p(0.1), p25: p(0.25), p50: p(0.5), p75: p(0.75), p90: p(0.9) };
+    },
     getGeneration: (id) => db.prepare("SELECT * FROM generations WHERE generation_id=?").get(id) || null,
 
     // Persist the (keyword-derived) generation type so it can be filtered/indexed

@@ -19,7 +19,7 @@ function inferGenerationType(systemPrompt: string | null): string {
   if (sp.includes("bullet")) return "Bullets";
   if (sp.includes("sustainab")) return "Sustainability";
   if (sp.includes("extract") || sp.includes("lookup") || sp.includes("identify")) return "Extraction";
-  if (sp.includes("title") || sp.includes("subhead") || sp.includes("naming")) return "Title";
+  if (sp.includes("title") || sp.includes("subhead") || sp.includes("headline") || sp.includes("naming")) return "Title";
   if (sp.includes("description") || sp.includes("copywriter") || sp.includes("copy")) return "Description";
   return "Other";
 }
