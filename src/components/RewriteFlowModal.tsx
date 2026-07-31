@@ -59,6 +59,11 @@ export function RewriteFlowModal({ open, onOpenChange, flow }: {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // Fetch keyed on a STABLE identifier for the flow step, not the `flow` object
+  // identity — the parent rebuilds `flow` on every render (baseFeedback is a fresh
+  // array each time), so depending on the object would refetch forever ("Building
+  // orchestration prompt…" that never settles).
+  const flowKey = flow ? `${flow.request.generation_id}::${flow.title}` : null;
   useEffect(() => {
     if (!open || !flow) return;
     let cancelled = false;
@@ -71,7 +76,8 @@ export function RewriteFlowModal({ open, onOpenChange, flow }: {
       .catch((e) => { if (!cancelled) setError(String(e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [open, flow]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on flowKey; `flow` identity is intentionally unstable
+  }, [open, flowKey]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

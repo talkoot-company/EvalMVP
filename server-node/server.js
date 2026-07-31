@@ -595,8 +595,20 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     const genTypes = req.query.gen_types
       ? String(req.query.gen_types).split(",").map((s) => s.trim()).filter(Boolean)
       : undefined;
-    const { total, rows } = await store.listGenerations({ search, model, dataset, limit, offset, validProductData, genTypes });
+    const minLen = req.query.min_len != null && req.query.min_len !== "" ? Number(req.query.min_len) : null;
+    const maxLen = req.query.max_len != null && req.query.max_len !== "" ? Number(req.query.max_len) : null;
+    const { total, rows } = await store.listGenerations({ search, model, dataset, limit, offset, validProductData, genTypes, minLen, maxLen });
     res.json({ total, limit, offset, items: rows.map((r) => rowToGeneration(r)) });
+  }));
+
+  // Response-length percentiles (chars) over the given types (default
+  // Description+Title), optionally scoped to a dataset — seeds the length filter bands.
+  app.get("/api/generations/length-percentiles", route(async (req, res) => {
+    const dataset = req.query.dataset || "";
+    const genTypes = req.query.gen_types
+      ? String(req.query.gen_types).split(",").map((s) => s.trim()).filter(Boolean)
+      : undefined;
+    res.json(await store.getLengthPercentiles({ dataset, genTypes }));
   }));
 
   app.get("/api/generations/counts-by-type", route(async (req, res) => {

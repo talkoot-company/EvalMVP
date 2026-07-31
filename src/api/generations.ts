@@ -35,7 +35,7 @@ async function apiFetch<T>(path: string): Promise<T> {
 }
 
 export const generationsApi = {
-  list: (params: { search?: string; model?: string; dataset?: string; limit?: number; offset?: number; validProductData?: boolean; genTypes?: string[] } = {}): Promise<GenerationsPage> => {
+  list: (params: { search?: string; model?: string; dataset?: string; limit?: number; offset?: number; validProductData?: boolean; genTypes?: string[]; minLen?: number; maxLen?: number } = {}): Promise<GenerationsPage> => {
     const qs = new URLSearchParams();
     if (params.search) qs.set("search", params.search);
     if (params.model) qs.set("model", params.model);
@@ -44,6 +44,8 @@ export const generationsApi = {
     if (params.offset !== undefined) qs.set("offset", String(params.offset));
     if (params.validProductData) qs.set("valid_product_data", "1");
     if (params.genTypes && params.genTypes.length) qs.set("gen_types", params.genTypes.join(","));
+    if (params.minLen != null) qs.set("min_len", String(params.minLen));
+    if (params.maxLen != null) qs.set("max_len", String(params.maxLen));
     return apiFetch(`/generations?${qs}`);
   },
 
@@ -52,4 +54,22 @@ export const generationsApi = {
   models: (): Promise<string[]> => apiFetch("/generations/models"),
 
   datasets: (): Promise<string[]> => apiFetch("/generations/datasets"),
+
+  lengthPercentiles: (params: { dataset?: string; genTypes?: string[] } = {}): Promise<LengthPercentiles> => {
+    const qs = new URLSearchParams();
+    if (params.dataset && params.dataset !== "all") qs.set("dataset", params.dataset);
+    if (params.genTypes && params.genTypes.length) qs.set("gen_types", params.genTypes.join(","));
+    return apiFetch(`/generations/length-percentiles?${qs}`);
+  },
 };
+
+// Character-length percentiles of response_content over the reference types
+// (Description+Title by default) — used to seed the length-filter bands.
+export interface LengthPercentiles {
+  count: number;
+  p10: number;
+  p25: number;
+  p50: number;
+  p75: number;
+  p90: number;
+}

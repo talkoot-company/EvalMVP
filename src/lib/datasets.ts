@@ -5,6 +5,7 @@
 const DATASET_LABELS: Record<string, string> = {
   cocacola: "Coca-Cola",
   puma: "PUMA",
+  guitarcenter: "Guitar Center",
 };
 
 export function datasetLabel(value: string): string {

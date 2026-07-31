@@ -36,6 +36,7 @@ const TYPE_CASE_SQL = `CASE
         OR CHARINDEX('identify', LOWER(system_prompt)) > 0 THEN 'Extraction'
       WHEN CHARINDEX('title', LOWER(system_prompt)) > 0
         OR CHARINDEX('subhead', LOWER(system_prompt)) > 0
+        OR CHARINDEX('headline', LOWER(system_prompt)) > 0
         OR CHARINDEX('naming', LOWER(system_prompt)) > 0 THEN 'Title'
       WHEN CHARINDEX('description', LOWER(system_prompt)) > 0
         OR CHARINDEX('copywriter', LOWER(system_prompt)) > 0
@@ -299,7 +300,7 @@ export async function createMssqlStore({ adonet, database, prefix }) {
       one(`SELECT * FROM ${tbl("criteria")} WHERE LOWER(criteria_name)=LOWER(@p0)`, [name]),
 
     // generations
-    listGenerations: async ({ search, model, dataset, limit, offset, validProductData, genTypes }) => {
+    listGenerations: async ({ search, model, dataset, limit, offset, validProductData, genTypes, minLen, maxLen }) => {
       const cond = [], params = [];
       if (search) {
         const p = params.length;
@@ -315,6 +316,9 @@ export async function createMssqlStore({ adonet, database, prefix }) {
         cond.push(`gen_type IN (${placeholders})`);
         params.push(...genTypes);
       }
+      // Response-length band (character count of the generated copy).
+      if (minLen != null) { cond.push(`LEN(response_content) >= @p${params.length}`); params.push(minLen); }
+      if (maxLen != null) { cond.push(`LEN(response_content) < @p${params.length}`); params.push(maxLen); }
       const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
       const totalRow = await one(`SELECT COUNT(*) AS n FROM ${tbl("generations")} ${where}`, params);
       const rows = await q(
@@ -332,6 +336,32 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     listGenerationDatasets: async () =>
       (await q(`SELECT DISTINCT dataset FROM ${tbl("generations")} WHERE dataset IS NOT NULL ORDER BY dataset`))
         .map((r) => r.dataset),
+    // p10/p25/p50/p75/p90 of response length (chars) over the given types (default
+    // Description+Title), optionally scoped to a dataset — seeds the length filter bands.
+    getLengthPercentiles: async ({ dataset, genTypes } = {}) => {
+      const cond = ["response_content IS NOT NULL"], params = [];
+      if (dataset && dataset !== "all") { cond.push(`dataset=@p${params.length}`); params.push(dataset); }
+      const types = genTypes && genTypes.length ? genTypes : ["Description", "Title"];
+      cond.push(`gen_type IN (${types.map((_, i) => `@p${params.length + i}`).join(",")})`);
+      params.push(...types);
+      // Single sort (one ROW_NUMBER over the int length), then nearest-rank pick
+      // per percentile — far cheaper than 5 PERCENTILE_CONT window sorts over MAX.
+      const nth = (frac) => `MAX(CASE WHEN rn = CAST(${frac} * cnt AS INT) + 1 THEN L END)`;
+      const row = await one(
+        `WITH ranked AS (
+           SELECT CAST(LEN(response_content) AS INT) AS L,
+                  ROW_NUMBER() OVER (ORDER BY LEN(response_content)) AS rn,
+                  COUNT(*) OVER () AS cnt
+           FROM ${tbl("generations")} WHERE ${cond.join(" AND ")}
+         )
+         SELECT MAX(cnt) AS count, ${nth("0.10")} AS p10, ${nth("0.25")} AS p25,
+                ${nth("0.50")} AS p50, ${nth("0.75")} AS p75, ${nth("0.90")} AS p90
+         FROM ranked`,
+        params,
+      );
+      if (!row || !row.count) return { count: 0, p10: 0, p25: 0, p50: 0, p75: 0, p90: 0 };
+      return { count: row.count, p10: row.p10, p25: row.p25, p50: row.p50, p75: row.p75, p90: row.p90 };
+    },
     getGeneration: async (id) =>
       fixGeneration(await one(`SELECT * FROM ${tbl("generations")} WHERE generation_id=@p0`, [id])),
 

@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/select";
 import { ScoreBadge } from "@/components/ScoreBadge";
 import { FilterDropdown } from "@/components/CriteriaFilterBar";
-import { useGenerationDatasets } from "@/hooks/useGenerations";
+import { useGenerationDatasets, useLengthPercentiles } from "@/hooks/useGenerations";
 import { datasetLabel } from "@/lib/datasets";
 import { ChatChainModal } from "@/components/ChatChainModal";
 import { RewriteDialog, type RewriteIteration } from "@/components/RewriteDialog";
@@ -114,6 +114,7 @@ export function SuiteTestPanel({
   // selector filters
   const [search, setSearch] = useState("");
   const [datasetFilter, setDatasetFilter] = useState("all");
+  const [lengthBand, setLengthBand] = useState("all");
   const [validProductDataOnly, setValidProductDataOnly] = useState(true);
   const [page, setPage] = useState(0);
 
@@ -171,12 +172,31 @@ export function SuiteTestPanel({
 
   // --- generation fetch (server-paginated) ---------------------------------
   const { data: datasets = [] } = useGenerationDatasets();
+  // Length-band cutoffs (chars) from p10/p25/p50/p75/p90 over Description+Title,
+  // scoped to the selected dataset so bands reflect the data being tested.
+  const { data: pctl } = useLengthPercentiles({ dataset: datasetFilter });
+  const lengthBands = useMemo(() => {
+    if (!pctl || !pctl.count) return [] as { value: string; label: string; min?: number; max?: number }[];
+    const { p10, p25, p50, p75, p90 } = pctl;
+    return [
+      { value: "lte_p10", label: `Shortest 10% (≤${p10})`, max: p10 },
+      { value: "p10_25", label: `p10–p25 (${p10}–${p25})`, min: p10, max: p25 },
+      { value: "p25_50", label: `p25–p50 (${p25}–${p50})`, min: p25, max: p50 },
+      { value: "p50_75", label: `p50–p75 (${p50}–${p75})`, min: p50, max: p75 },
+      { value: "p75_90", label: `p75–p90 (${p75}–${p90})`, min: p75, max: p90 },
+      { value: "gte_p90", label: `Longest 10% (≥${p90})`, min: p90 },
+    ];
+  }, [pctl]);
+  const activeBand = lengthBands.find((b) => b.value === lengthBand);
+
   const { data, isLoading } = useQuery({
-    queryKey: ["suite-gens", [...genTypeFilter].sort(), datasetFilter, validProductDataOnly, search, page],
+    queryKey: ["suite-gens", [...genTypeFilter].sort(), datasetFilter, lengthBand, validProductDataOnly, search, page],
     queryFn: () => generationsApi.list({
       genTypes: [...genTypeFilter],
       dataset: datasetFilter,
       validProductData: validProductDataOnly,
+      minLen: activeBand?.min,
+      maxLen: activeBand?.max,
       search: search || undefined,
       limit: PAGE_SIZE,
       offset: page * PAGE_SIZE,
@@ -430,7 +450,7 @@ export function SuiteTestPanel({
               onClear={clearGenType}
             />
             {datasets.length > 0 && (
-              <Select value={datasetFilter} onValueChange={(v) => { setDatasetFilter(v); setPage(0); }}>
+              <Select value={datasetFilter} onValueChange={(v) => { setDatasetFilter(v); setLengthBand("all"); setPage(0); }}>
                 <SelectTrigger className="h-10 w-40 text-xs">
                   <SelectValue placeholder="All datasets" />
                 </SelectTrigger>
@@ -438,6 +458,19 @@ export function SuiteTestPanel({
                   <SelectItem value="all">All datasets</SelectItem>
                   {datasets.map((d) => (
                     <SelectItem key={d} value={d}>{datasetLabel(d)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            {lengthBands.length > 0 && (
+              <Select value={lengthBand} onValueChange={(v) => { setLengthBand(v); setPage(0); }}>
+                <SelectTrigger className="h-10 w-52 text-xs" title="Filter by response length (characters). Bands are the p10/p25/p50/p75/p90 of Description + Title copy.">
+                  <SelectValue placeholder="Any length" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Any length</SelectItem>
+                  {lengthBands.map((b) => (
+                    <SelectItem key={b.value} value={b.value}>{b.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
