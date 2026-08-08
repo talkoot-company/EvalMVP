@@ -77,12 +77,31 @@ const BASE_SCHEMA = `
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS suite_workflows (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    description  TEXT,
+    steps        TEXT,               -- JSON: [{ suite_id, mode }] ordered
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS suite_workflow_runs (
+    id             TEXT PRIMARY KEY,
+    workflow_id    TEXT NOT NULL,
+    generation_id  TEXT NOT NULL,
+    status         TEXT NOT NULL,     -- running | done | error
+    data           TEXT NOT NULL,     -- JSON: { generation_id, original_copy, steps: [...] }
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS suites (
     id           TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     description  TEXT,
     active       INTEGER NOT NULL DEFAULT 1,
     rewrite_orchestration_prompt TEXT,
+    eval_model    TEXT,
+    rewrite_model TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
   );
@@ -116,10 +135,22 @@ const BASE_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_generations_model ON generations (model);
   CREATE INDEX IF NOT EXISTS idx_refinement_criterion ON refinement_chains (criterion_id);
   CREATE INDEX IF NOT EXISTS idx_suite_rewrite_suite ON suite_rewrite_chains (suite_id);
+  CREATE INDEX IF NOT EXISTS idx_suite_workflow_runs_workflow ON suite_workflow_runs (workflow_id);
 `;
 
 const chainKey = (criterionId, generationId) => `${criterionId}::${generationId}`;
 const suiteRewriteKey = (suiteId, generationId) => `${suiteId}::${generationId}`;
+
+// suite_workflows.steps is stored as a JSON string; (de)serialize around the generic row helpers.
+function parseWorkflowSteps(row) {
+  let steps = [];
+  try { steps = row.steps ? JSON.parse(row.steps) : []; } catch { steps = []; }
+  return { ...row, steps: Array.isArray(steps) ? steps : [] };
+}
+function serializeWorkflowSteps(obj) {
+  if (obj && "steps" in obj) return { ...obj, steps: JSON.stringify(obj.steps ?? []) };
+  return obj;
+}
 
 const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"], suites: ["active"] };
 const DATE_COLS = { criteria: ["created_at", "updated_at", "uploaded_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"], prompt_templates: ["created_at", "updated_at"], criteria_uploads: ["uploaded_at"] };
@@ -197,6 +228,21 @@ export function createSqliteStore(dbPath) {
   }
   try {
     db.exec("ALTER TABLE suites ADD COLUMN rewrite_orchestration_prompt TEXT");
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec("ALTER TABLE suites ADD COLUMN eval_model TEXT");
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec("ALTER TABLE suites ADD COLUMN rewrite_model TEXT");
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec("ALTER TABLE suite_workflows ADD COLUMN steps TEXT");
   } catch {
     /* column already exists */
   }
@@ -408,6 +454,46 @@ export function createSqliteStore(dbPath) {
       db.prepare("INSERT OR IGNORE INTO suite_criteria (suite_id, criterion_id) VALUES (?,?)").run(suiteId, criterionId),
     removeSuiteCriterion: (suiteId, criterionId) =>
       db.prepare("DELETE FROM suite_criteria WHERE suite_id=? AND criterion_id=?").run(suiteId, criterionId),
+
+    // suite workflows (ordered chain of suites; `steps` is JSON [{ suite_id, mode }])
+    listSuiteWorkflows: () =>
+      db.prepare("SELECT * FROM suite_workflows ORDER BY updated_at DESC").all().map(parseWorkflowSteps),
+    getSuiteWorkflow: (id) => {
+      const row = db.prepare("SELECT * FROM suite_workflows WHERE id=?").get(id);
+      return row ? parseWorkflowSteps(row) : null;
+    },
+    insertSuiteWorkflow: (obj) => insertRow("suite_workflows", serializeWorkflowSteps(obj)),
+    updateSuiteWorkflow: (id, obj) => updateRow("suite_workflows", "id", id, serializeWorkflowSteps(obj)),
+    deleteSuiteWorkflow: (id) => {
+      db.transaction(() => {
+        db.prepare("DELETE FROM suite_workflow_runs WHERE workflow_id=?").run(id);
+        db.prepare("DELETE FROM suite_workflows WHERE id=?").run(id);
+      })();
+    },
+
+    // suite workflow runs (one run = one workflow × one generation; `data` is the JSON run tree)
+    createSuiteWorkflowRun: (run) => {
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO suite_workflow_runs (id, workflow_id, generation_id, status, data, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?)`
+      ).run(run.id, run.workflow_id, run.generation_id, run.status ?? "running", JSON.stringify(run.data ?? {}), now, now);
+    },
+    getSuiteWorkflowRun: (id) => {
+      const row = db.prepare("SELECT * FROM suite_workflow_runs WHERE id=?").get(id);
+      return row ? { ...row, data: JSON.parse(row.data) } : null;
+    },
+    listSuiteWorkflowRuns: (workflowId) =>
+      db.prepare("SELECT * FROM suite_workflow_runs WHERE workflow_id=? ORDER BY created_at DESC").all(workflowId)
+        .map((r) => ({ ...r, data: JSON.parse(r.data) })),
+    updateSuiteWorkflowRun: (id, { status, data }) => {
+      const now = new Date().toISOString();
+      const sets = ["updated_at=?"], params = [now];
+      if (status !== undefined) { sets.push("status=?"); params.push(status); }
+      if (data !== undefined) { sets.push("data=?"); params.push(JSON.stringify(data)); }
+      db.prepare(`UPDATE suite_workflow_runs SET ${sets.join(", ")} WHERE id=?`).run(...params, id);
+    },
+    deleteSuiteWorkflowRun: (id) => db.prepare("DELETE FROM suite_workflow_runs WHERE id=?").run(id),
 
     // prompt templates
     listPromptTemplates: () => db.prepare("SELECT * FROM prompt_templates ORDER BY category, name").all(),

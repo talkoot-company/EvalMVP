@@ -1,6 +1,7 @@
 // Port of server/eval_runner.py — single-criterion eval via Azure OpenAI.
 import { AzureOpenAI } from "openai";
 import { renderTemplate, defaultTemplate } from "./prompt-templates.js";
+import { isAnthropicModel } from "./models.js";
 
 // Credentials come from .env.local (gitignored). See README note in index.js.
 function makeClient() {
@@ -22,9 +23,56 @@ export function aiClient() {
 // Read at call time, not import time, so Electron can load config first.
 export const llmModel = () => process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-5";
 
-async function callLlm(messages) {
-  const response = await aiClient().chat.completions.create({ model: llmModel(), messages });
-  const raw = response.choices[0]?.message?.content || "";
+// Derive the Foundry inference host (services.ai.azure.com) — which serves the
+// native Anthropic Messages API — from the Azure OpenAI endpoint's resource name,
+// unless explicitly overridden via AZURE_ANTHROPIC_ENDPOINT.
+function anthropicEndpoint() {
+  const override = process.env.AZURE_ANTHROPIC_ENDPOINT;
+  if (override) return override.replace(/\/+$/, "");
+  const base = process.env.AZURE_OPENAI_ENDPOINT || "";
+  const m = base.match(/^https?:\/\/([^.]+)\./);
+  if (!m) throw new Error("Cannot derive Anthropic endpoint from AZURE_OPENAI_ENDPOINT (set AZURE_ANTHROPIC_ENDPOINT)");
+  return `https://${m[1]}.services.ai.azure.com`;
+}
+
+const ANTHROPIC_MAX_TOKENS = Number(process.env.AZURE_ANTHROPIC_MAX_TOKENS || 8192);
+
+// Call a Claude deployment via the native Anthropic Messages API. Adapts the
+// OpenAI-style message array (system pulled out as a top-level field) and returns
+// the concatenated text blocks (thinking blocks are ignored).
+async function anthropicComplete(messages, model) {
+  const apiKey = process.env.AZURE_OPENAI_API_KEY;
+  if (!apiKey) throw new Error("AZURE_OPENAI_API_KEY not set");
+  const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n") || undefined;
+  const turns = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role, content: m.content }));
+  const res = await fetch(`${anthropicEndpoint()}/anthropic/v1/messages`, {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ model, system, max_tokens: ANTHROPIC_MAX_TOKENS, messages: turns }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`Anthropic API ${res.status}: ${t.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+}
+
+// Unified text completion. Routes Anthropic-format deployments to the Anthropic
+// Messages API and everything else to the Azure OpenAI chat-completions client.
+export async function chatText({ model, messages }) {
+  const resolved = model || llmModel();
+  if (isAnthropicModel(resolved)) return anthropicComplete(messages, resolved);
+  const response = await aiClient().chat.completions.create({ model: resolved, messages });
+  return response.choices[0]?.message?.content || "";
+}
+
+async function callLlm(messages, model) {
+  const raw = await chatText({ model, messages });
   const cleaned = raw.replaceAll("```json", "").replaceAll("```", "").trim();
   try {
     return JSON.parse(cleaned);
@@ -288,12 +336,12 @@ export function buildEvalMessages(copyText, productData, criterion, template) {
 // Main eval entry point
 // ---------------------------------------------------------------------------
 
-export async function runSingleEval(copyText, productData, criterion, template) {
+export async function runSingleEval(copyText, productData, criterion, template, model) {
   const criteriaType = criterion.criteria_type || "numerical-scale";
   const evalDefinition = criterion.eval_definition || {};
 
   const messages = buildEvalMessages(copyText, productData, criterion, template);
-  const result = await callLlm(messages);
+  const result = await callLlm(messages, model);
 
   let score = "", rationale = "", evidence = [];
   if (result && typeof result === "object") {

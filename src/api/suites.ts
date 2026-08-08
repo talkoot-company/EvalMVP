@@ -29,7 +29,7 @@ export const suitesApi = {
   create: (suite: NewSuite): Promise<Suite> =>
     apiFetch("/suites", { method: "POST", body: JSON.stringify(suite) }),
 
-  update: (id: string, patch: Partial<Pick<Suite, "name" | "description" | "active" | "rewrite_orchestration_prompt">>): Promise<Suite> =>
+  update: (id: string, patch: Partial<Pick<Suite, "name" | "description" | "active" | "rewrite_orchestration_prompt" | "eval_model" | "rewrite_model">>): Promise<Suite> =>
     apiFetch(`/suites/${id}`, { method: "PUT", body: JSON.stringify(patch) }),
 
   delete: (id: string): Promise<void> =>

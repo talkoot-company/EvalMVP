@@ -7,6 +7,7 @@ import {
   GitFork,
   Database,
   FileText,
+  Workflow,
   LogOut,
   ChevronLeft,
   ChevronRight,
@@ -17,6 +18,7 @@ import { logout } from "@/lib/auth";
 const navItems = [
   { to: "/criteria",    icon: ListChecks, label: "Criteria" },
   { to: "/suites",      icon: Layers,     label: "Suites" },
+  { to: "/suite-workflows", icon: Workflow, label: "Suite Workflows" },
   { to: "/prompts",     icon: FileText,   label: "Prompts" },
   { to: "/generations", icon: Sparkles,   label: "Generations" },
   { to: "/mapping",     icon: GitFork,    label: "Mapping" },

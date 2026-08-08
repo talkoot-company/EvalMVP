@@ -156,7 +156,9 @@ export const evalsApi = {
   messages: (req: ChatMessagesRequest): Promise<{ mode: string; messages: ChatMessage[] }> =>
     apiFetch("/eval/messages", { method: "POST", body: JSON.stringify(req) }),
 
-  run: (generation_id: string, opts: { criterion_id?: string; criterion_name?: string }): Promise<EvalResult> =>
+  // `suite_id` + `model` are optional: the backend resolves the eval model as
+  // model (session override) → suite's configured eval_model → default (gpt-5).
+  run: (generation_id: string, opts: { criterion_id?: string; criterion_name?: string; suite_id?: string; model?: string }): Promise<EvalResult> =>
     apiFetch("/eval/run", {
       method: "POST",
       body: JSON.stringify({ generation_id, ...opts }),
@@ -175,15 +177,15 @@ export const evalsApi = {
   // criterion it was evaluated against. `suite_id` selects which suite's rewrite
   // orchestration prompt drives the coherence-thesis step (default otherwise).
   // Returns the improved copy plus the thesis the orchestration produced.
-  rewrite: (generation_id: string, feedback: RewriteFeedbackItem[], content?: string, suite_id?: string): Promise<{ improved_content: string; thesis?: string }> =>
+  rewrite: (generation_id: string, feedback: RewriteFeedbackItem[], content?: string, suite_id?: string, model?: string): Promise<{ improved_content: string; thesis?: string }> =>
     apiFetch("/rewrite", {
       method: "POST",
-      body: JSON.stringify({ generation_id, feedback, content, suite_id }),
+      body: JSON.stringify({ generation_id, feedback, content, suite_id, model }),
     }),
 
   // Re-grade arbitrary content (e.g. the post-edited copy) against a criterion,
   // reusing the generation's product data for grounding/hallucination checks.
-  regrade: (generation_id: string, opts: { criterion_id?: string; criterion_name?: string; content: string }): Promise<RegradeResult> =>
+  regrade: (generation_id: string, opts: { criterion_id?: string; criterion_name?: string; content: string; suite_id?: string; model?: string }): Promise<RegradeResult> =>
     apiFetch("/eval/regrade", {
       method: "POST",
       body: JSON.stringify({ generation_id, ...opts }),

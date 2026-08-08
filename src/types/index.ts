@@ -97,6 +97,75 @@ export interface PromptTemplate {
 }
 
 // DB-backed suite: a named collection of evaluation criteria.
+export type WorkflowStepMode = "assess_only" | "rewrite_once" | "rewrite_until_pass";
+
+export interface WorkflowStep {
+  suite_id: string;
+  mode: WorkflowStepMode;
+}
+
+export interface SuiteWorkflow {
+  id: string;
+  name: string;
+  description: string | null;
+  steps: WorkflowStep[];
+  created_at: string;
+  updated_at: string;
+}
+
+// One re-graded criterion at some point in a stage (same shape as RewriteFeedbackItem).
+export interface WorkflowGrade {
+  criterion_id: string;
+  criterion_name: string;
+  score: string;
+  desired_score: string;
+  rationale: string;
+  evidence: string[];
+}
+
+export interface WorkflowRunIteration {
+  content: string;
+  thesis?: string;
+  grades: WorkflowGrade[];
+  created_at: string;
+}
+
+export interface WorkflowRunStage {
+  position: number;
+  suite_id: string;
+  suite_name: string;
+  mode: WorkflowStepMode;
+  input_copy: string;
+  initial_grades: WorkflowGrade[];
+  iterations: WorkflowRunIteration[];
+  output_copy: string;
+  status: "pending" | "running" | "done" | "error";
+  error?: string;
+  // The deployment names actually used for this stage (resolved: run override →
+  // suite's configured model → default). Recorded so a run shows what it ran on.
+  eval_model?: string;
+  rewrite_model?: string;
+}
+
+export interface SuiteWorkflowRunData {
+  generation_id: string;
+  original_copy: string;
+  stages: WorkflowRunStage[];
+  // Run-level model overrides. null/undefined → each step uses its suite's model.
+  eval_model?: string | null;
+  rewrite_model?: string | null;
+}
+
+export interface SuiteWorkflowRun {
+  id: string;
+  workflow_id: string;
+  generation_id: string;
+  status: "running" | "done" | "error";
+  data: SuiteWorkflowRunData;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Suite {
   id: string;
   name: string;
@@ -105,6 +174,9 @@ export interface Suite {
   // Per-suite prompt that turns the criteria feedback into a coherence thesis
   // before the rewrite. null → the rewrite uses the built-in default.
   rewrite_orchestration_prompt: string | null;
+  // Per-suite LLM deployment for assessment / rewrite. null → default (gpt-5).
+  eval_model: string | null;
+  rewrite_model: string | null;
   criteria_ids: string[];
   created_at: string;
   updated_at: string;

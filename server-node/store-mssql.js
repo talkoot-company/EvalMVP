@@ -5,7 +5,7 @@ import sql from "mssql";
 import { DEFAULT_PROMPTS } from "./prompt-templates.js";
 
 const BOOL_COLS = { criteria: ["active"], generations: ["is_valid"], suites: ["active"] };
-const DATE_COLS = { criteria: ["created_at", "updated_at", "uploaded_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"], prompt_templates: ["created_at", "updated_at"], criteria_uploads: ["uploaded_at"] };
+const DATE_COLS = { criteria: ["created_at", "updated_at", "uploaded_at"], eval_results: ["run_at"], suites: ["created_at", "updated_at"], suite_workflows: ["created_at", "updated_at"], suite_workflow_runs: ["created_at", "updated_at"], prompt_templates: ["created_at", "updated_at"], criteria_uploads: ["uploaded_at"] };
 const PK = {
   criteria: ["id"],
   generations: ["generation_id"],
@@ -93,6 +93,18 @@ function coerceWrite(base, obj) {
 function fixGeneration(row) {
   if (row && row.created_at != null) row.created_at = Number(row.created_at);
   return row;
+}
+
+// suite_workflows.steps is stored as a JSON string; (de)serialize around row helpers.
+function parseWorkflowSteps(row) {
+  if (!row) return row;
+  let steps = [];
+  try { steps = row.steps ? JSON.parse(row.steps) : []; } catch { steps = []; }
+  return { ...row, steps: Array.isArray(steps) ? steps : [] };
+}
+function serializeWorkflowSteps(obj) {
+  if (obj && "steps" in obj) return { ...obj, steps: JSON.stringify(obj.steps ?? []) };
+  return obj;
 }
 
 export async function createMssqlStore({ adonet, database, prefix }) {
@@ -205,6 +217,8 @@ export async function createMssqlStore({ adonet, database, prefix }) {
        description  NVARCHAR(MAX)  NULL,
        active       BIT            NOT NULL,
        rewrite_orchestration_prompt NVARCHAR(MAX) NULL,
+       eval_model    NVARCHAR(200) NULL,
+       rewrite_model NVARCHAR(200) NULL,
        created_at   DATETIME2(7)   NOT NULL,
        updated_at   DATETIME2(7)   NOT NULL
      );`
@@ -215,6 +229,15 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     `IF COL_LENGTH(N'[dbo].[${prefix}suites]', N'rewrite_orchestration_prompt') IS NULL
      ALTER TABLE [dbo].[${prefix}suites] ADD rewrite_orchestration_prompt NVARCHAR(MAX) NULL;`
   );
+  // Self-provision the per-suite eval/rewrite model columns on existing tables.
+  await q(
+    `IF COL_LENGTH(N'[dbo].[${prefix}suites]', N'eval_model') IS NULL
+     ALTER TABLE [dbo].[${prefix}suites] ADD eval_model NVARCHAR(200) NULL;`
+  );
+  await q(
+    `IF COL_LENGTH(N'[dbo].[${prefix}suites]', N'rewrite_model') IS NULL
+     ALTER TABLE [dbo].[${prefix}suites] ADD rewrite_model NVARCHAR(200) NULL;`
+  );
   await q(
     `IF OBJECT_ID(N'[dbo].[${prefix}suite_criteria]', N'U') IS NULL
      CREATE TABLE [dbo].[${prefix}suite_criteria] (
@@ -222,6 +245,39 @@ export async function createMssqlStore({ adonet, database, prefix }) {
        criterion_id NVARCHAR(200) NOT NULL,
        CONSTRAINT [PK_${prefix}suite_criteria] PRIMARY KEY (suite_id, criterion_id)
      );`
+  );
+  // Self-provision suite_workflows (ordered chain of suites; `steps` is JSON).
+  await q(
+    `IF OBJECT_ID(N'[dbo].[${prefix}suite_workflows]', N'U') IS NULL
+     CREATE TABLE [dbo].[${prefix}suite_workflows] (
+       id           NVARCHAR(200)  NOT NULL PRIMARY KEY,
+       name         NVARCHAR(500)  NOT NULL,
+       description  NVARCHAR(MAX)  NULL,
+       steps        NVARCHAR(MAX)  NULL,
+       created_at   DATETIME2(7)   NOT NULL,
+       updated_at   DATETIME2(7)   NOT NULL
+     );`
+  );
+  await q(
+    `IF COL_LENGTH(N'[dbo].[${prefix}suite_workflows]', N'steps') IS NULL
+     ALTER TABLE [dbo].[${prefix}suite_workflows] ADD steps NVARCHAR(MAX) NULL;`
+  );
+  // Suite workflow runs (one run = one workflow × one generation; `data` is the JSON run tree).
+  await q(
+    `IF OBJECT_ID(N'[dbo].[${prefix}suite_workflow_runs]', N'U') IS NULL
+     CREATE TABLE [dbo].[${prefix}suite_workflow_runs] (
+       id             NVARCHAR(200)  NOT NULL PRIMARY KEY,
+       workflow_id    NVARCHAR(200)  NOT NULL,
+       generation_id  NVARCHAR(64)   NOT NULL,
+       status         NVARCHAR(20)   NOT NULL,
+       data           NVARCHAR(MAX)  NOT NULL,
+       created_at     DATETIME2(7)   NOT NULL,
+       updated_at     DATETIME2(7)   NOT NULL
+     );`
+  );
+  await q(
+    `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_${prefix}suite_workflow_runs_workflow')
+     CREATE INDEX [idx_${prefix}suite_workflow_runs_workflow] ON [dbo].[${prefix}suite_workflow_runs](workflow_id);`
   );
   await q(
     `IF OBJECT_ID(N'[dbo].[${prefix}prompt_templates]', N'U') IS NULL
@@ -494,6 +550,42 @@ export async function createMssqlStore({ adonet, database, prefix }) {
         [suiteId, criterionId]),
     removeSuiteCriterion: (suiteId, criterionId) =>
       q(`DELETE FROM ${tbl("suite_criteria")} WHERE suite_id=@p0 AND criterion_id=@p1`, [suiteId, criterionId]),
+
+    // suite workflows (ordered chain of suites; `steps` is JSON [{ suite_id, mode }])
+    listSuiteWorkflows: async () =>
+      (await q(`SELECT * FROM ${tbl("suite_workflows")} ORDER BY updated_at DESC`)).map(parseWorkflowSteps),
+    getSuiteWorkflow: async (id) => parseWorkflowSteps(await one(`SELECT * FROM ${tbl("suite_workflows")} WHERE id=@p0`, [id])),
+    insertSuiteWorkflow: (obj) => insertRow("suite_workflows", serializeWorkflowSteps(obj)),
+    updateSuiteWorkflow: (id, obj) => updateRow("suite_workflows", "id", id, serializeWorkflowSteps(obj)),
+    deleteSuiteWorkflow: async (id) => {
+      await q(`DELETE FROM ${tbl("suite_workflow_runs")} WHERE workflow_id=@p0`, [id]);
+      await q(`DELETE FROM ${tbl("suite_workflows")} WHERE id=@p0`, [id]);
+    },
+
+    // suite workflow runs (one run = one workflow × one generation; `data` is the JSON run tree)
+    createSuiteWorkflowRun: async (run) => {
+      const now = new Date();
+      await q(
+        `INSERT INTO ${tbl("suite_workflow_runs")} (id, workflow_id, generation_id, status, data, created_at, updated_at)
+         VALUES (@p0,@p1,@p2,@p3,@p4,@p5,@p6)`,
+        [run.id, run.workflow_id, run.generation_id, run.status ?? "running", JSON.stringify(run.data ?? {}), now, now]
+      );
+    },
+    getSuiteWorkflowRun: async (id) => {
+      const row = await one(`SELECT * FROM ${tbl("suite_workflow_runs")} WHERE id=@p0`, [id]);
+      if (!row) return null;
+      return { ...row, data: typeof row.data === "string" ? JSON.parse(row.data) : row.data };
+    },
+    listSuiteWorkflowRuns: async (workflowId) =>
+      (await q(`SELECT * FROM ${tbl("suite_workflow_runs")} WHERE workflow_id=@p0 ORDER BY created_at DESC`, [workflowId]))
+        .map((r) => ({ ...r, data: typeof r.data === "string" ? JSON.parse(r.data) : r.data })),
+    updateSuiteWorkflowRun: async (id, { status, data }) => {
+      const sets = ["updated_at=@p0"], params = [new Date()];
+      if (status !== undefined) { sets.push(`status=@p${params.length}`); params.push(status); }
+      if (data !== undefined) { sets.push(`data=@p${params.length}`); params.push(JSON.stringify(data)); }
+      await q(`UPDATE ${tbl("suite_workflow_runs")} SET ${sets.join(", ")} WHERE id=@p${params.length}`, [...params, id]);
+    },
+    deleteSuiteWorkflowRun: (id) => q(`DELETE FROM ${tbl("suite_workflow_runs")} WHERE id=@p0`, [id]),
 
     // prompt templates
     listPromptTemplates: () => q(`SELECT * FROM ${tbl("prompt_templates")} ORDER BY category, name`),

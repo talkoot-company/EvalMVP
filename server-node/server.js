@@ -14,7 +14,7 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import {
-  runSingleEval, buildEvalMessages, aiClient, llmModel,
+  runSingleEval, buildEvalMessages, llmModel, chatText,
   heuristicProductFields, aiExtractProductFields, productDataFromFields, formatProductSection,
 } from "./eval-runner.js";
 import { exportZipBuffer, importZipBuffer, KINDS } from "./data-transfer.js";
@@ -22,12 +22,25 @@ import {
   renderTemplate, defaultTemplate, DEFAULT_PROMPTS,
   DEFAULT_REWRITE_ORCHESTRATION_PROMPT, REWRITE_ORCHESTRATION_PLACEHOLDERS,
 } from "./prompt-templates.js";
+import { AVAILABLE_MODELS, DEFAULT_MODEL, pickModel } from "./models.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 const nowIso = () => new Date().toISOString();
+
+// Workflow step modes: assess only, rewrite once, or rewrite up to 3× until all pass.
+const WORKFLOW_STEP_MODES = new Set(["assess_only", "rewrite_once", "rewrite_until_pass"]);
+function sanitizeWorkflowSteps(steps) {
+  if (!Array.isArray(steps)) return [];
+  return steps
+    .filter((s) => s && s.suite_id)
+    .map((s) => ({
+      suite_id: String(s.suite_id),
+      mode: WORKFLOW_STEP_MODES.has(s.mode) ? s.mode : "assess_only",
+    }));
+}
 
 function slugify(text) {
   return text
@@ -164,7 +177,7 @@ const CRITERIA_COLUMNS = [
   "customer", "brand", "custom_tags", "notes",
 ];
 
-const SUITE_COLUMNS = ["name", "description", "active", "rewrite_orchestration_prompt"];
+const SUITE_COLUMNS = ["name", "description", "active", "rewrite_orchestration_prompt", "eval_model", "rewrite_model"];
 const PROMPT_TEMPLATE_COLUMNS = ["name", "description", "template"];
 
 const GENERATION_TYPES = ["Title", "Description", "Bullets", "Sustainability", "Extraction", "Other"];
@@ -526,6 +539,9 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       // Left null on create → the rewrite falls back to the default orchestration
       // prompt until the suite sets its own.
       rewrite_orchestration_prompt: body.rewrite_orchestration_prompt ?? null,
+      // null → eval/rewrite fall back to the default deployment (gpt-5).
+      eval_model: body.eval_model ?? null,
+      rewrite_model: body.rewrite_model ?? null,
       created_at: now,
       updated_at: now,
     });
@@ -549,6 +565,8 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       description: merged.description ?? null,
       active: merged.active,
       rewrite_orchestration_prompt: merged.rewrite_orchestration_prompt ?? null,
+      eval_model: merged.eval_model ?? null,
+      rewrite_model: merged.rewrite_model ?? null,
       updated_at: nowIso(),
     });
     res.json({ ...rowToSuite(await store.getSuite(req.params.id)), criteria_ids: await store.getSuiteCriterionIds(req.params.id) });
@@ -580,6 +598,93 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     if (!(await store.getSuite(req.params.id))) throw new HttpError(404, "Suite not found");
     await store.removeSuiteCriterion(req.params.id, req.params.criterionId);
     await store.updateSuite(req.params.id, { updated_at: nowIso() });
+    res.status(204).end();
+  }));
+
+  // ----- Suite workflows routes (standalone list; placeholder editor for now) -----
+
+  app.get("/api/suite-workflows", route(async (req, res) => {
+    res.json(await store.listSuiteWorkflows());
+  }));
+
+  app.post("/api/suite-workflows", route(async (req, res) => {
+    const body = req.body || {};
+    if (!body.name || !String(body.name).trim()) throw new HttpError(422, "name is required");
+    const now = nowIso();
+    const id = randomUUID();
+    await store.insertSuiteWorkflow({
+      id,
+      name: String(body.name).trim(),
+      description: body.description ?? null,
+      steps: sanitizeWorkflowSteps(body.steps),
+      created_at: now,
+      updated_at: now,
+    });
+    res.status(201).json(await store.getSuiteWorkflow(id));
+  }));
+
+  app.get("/api/suite-workflows/:id", route(async (req, res) => {
+    const row = await store.getSuiteWorkflow(req.params.id);
+    if (!row) throw new HttpError(404, "Suite workflow not found");
+    res.json(row);
+  }));
+
+  app.put("/api/suite-workflows/:id", route(async (req, res) => {
+    const existing = await store.getSuiteWorkflow(req.params.id);
+    if (!existing) throw new HttpError(404, "Suite workflow not found");
+    const body = req.body || {};
+    const patch = { updated_at: nowIso() };
+    if ("name" in body) patch.name = String(body.name).trim();
+    if ("description" in body) patch.description = body.description ?? null;
+    if ("steps" in body) patch.steps = sanitizeWorkflowSteps(body.steps);
+    await store.updateSuiteWorkflow(req.params.id, patch);
+    res.json(await store.getSuiteWorkflow(req.params.id));
+  }));
+
+  app.delete("/api/suite-workflows/:id", route(async (req, res) => {
+    if (!(await store.getSuiteWorkflow(req.params.id))) throw new HttpError(404, "Suite workflow not found");
+    await store.deleteSuiteWorkflow(req.params.id);
+    res.status(204).end();
+  }));
+
+  // ----- Suite workflow runs (one run = one workflow × one generation) -----
+
+  app.get("/api/suite-workflows/:id/runs", route(async (req, res) => {
+    if (!(await store.getSuiteWorkflow(req.params.id))) throw new HttpError(404, "Suite workflow not found");
+    res.json(await store.listSuiteWorkflowRuns(req.params.id));
+  }));
+
+  app.post("/api/suite-workflows/:id/runs", route(async (req, res) => {
+    if (!(await store.getSuiteWorkflow(req.params.id))) throw new HttpError(404, "Suite workflow not found");
+    const body = req.body || {};
+    if (!body.generation_id) throw new HttpError(422, "generation_id is required");
+    const id = randomUUID();
+    await store.createSuiteWorkflowRun({
+      id,
+      workflow_id: req.params.id,
+      generation_id: String(body.generation_id),
+      status: body.status ?? "running",
+      data: body.data ?? {},
+    });
+    res.status(201).json(await store.getSuiteWorkflowRun(id));
+  }));
+
+  app.get("/api/suite-workflow-runs/:runId", route(async (req, res) => {
+    const run = await store.getSuiteWorkflowRun(req.params.runId);
+    if (!run) throw new HttpError(404, "Run not found");
+    res.json(run);
+  }));
+
+  app.put("/api/suite-workflow-runs/:runId", route(async (req, res) => {
+    if (!(await store.getSuiteWorkflowRun(req.params.runId))) throw new HttpError(404, "Run not found");
+    const body = req.body || {};
+    await store.updateSuiteWorkflowRun(req.params.runId, { status: body.status, data: body.data });
+    res.json(await store.getSuiteWorkflowRun(req.params.runId));
+  }));
+
+  app.delete("/api/suite-workflow-runs/:runId", route(async (req, res) => {
+    if (!(await store.getSuiteWorkflowRun(req.params.runId))) throw new HttpError(404, "Run not found");
+    await store.deleteSuiteWorkflowRun(req.params.runId);
     res.status(204).end();
   }));
 
@@ -658,6 +763,11 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     })));
   }));
 
+  // Available LLM deployments for eval/rewrite model selection (+ the default).
+  app.get("/api/models", route(async (_req, res) => {
+    res.json({ default: DEFAULT_MODEL, models: AVAILABLE_MODELS });
+  }));
+
   app.post("/api/eval/run", route(async (req, res) => {
     const body = req.body || {};
     const criterionId = body.criterion_id !== null && body.criterion_id !== undefined ? String(body.criterion_id) : null;
@@ -692,9 +802,13 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       store, genRow, requestMessages, { allowAi: true, extractionTemplate: await loadTemplate("product_extraction") },
     );
 
+    // Model: explicit request override → suite's configured eval model → default.
+    const evalSuite = body.suite_id ? await store.getSuite(body.suite_id) : null;
+    const evalModel = pickModel(body.model, evalSuite?.eval_model) || llmModel();
+
     let result;
     try {
-      result = await runSingleEval(copyText, productData, criterion, await loadTemplate("eval_grading"));
+      result = await runSingleEval(copyText, productData, criterion, await loadTemplate("eval_grading"), evalModel);
     } catch (err) {
       throw new HttpError(500, `Eval failed: ${err.message || err}`);
     }
@@ -775,9 +889,13 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       store, genRow, requestMessages, { allowAi: true, extractionTemplate: await loadTemplate("product_extraction") },
     );
 
+    // Model: explicit request override → suite's configured eval model → default.
+    const regradeSuite = body.suite_id ? await store.getSuite(body.suite_id) : null;
+    const regradeModel = pickModel(body.model, regradeSuite?.eval_model) || llmModel();
+
     let result;
     try {
-      result = await runSingleEval(content, productData, criterion, await loadTemplate("eval_grading"));
+      result = await runSingleEval(content, productData, criterion, await loadTemplate("eval_grading"), regradeModel);
     } catch (err) {
       throw new HttpError(500, `Re-grade failed: ${err.message || err}`);
     }
@@ -896,11 +1014,10 @@ export function createApp({ store, resultsDir, staticDir = null }) {
 
     let improved;
     try {
-      const response = await aiClient().chat.completions.create({
-        model: llmModel(),
+      improved = await chatText({
+        model: pickModel(body.model) || llmModel(),
         messages: [{ role: "user", content: postEditPrompt }],
       });
-      improved = response.choices[0]?.message?.content || "";
     } catch (err) {
       throw new HttpError(500, `Post-edit failed: ${err.message || err}`);
     }
@@ -921,6 +1038,10 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       ? body.content
       : (genRow.response_content || "");
 
+    // Model: explicit request override → suite's configured rewrite model → default.
+    const rewriteSuite = body.suite_id ? await store.getSuite(body.suite_id) : null;
+    const rewriteModel = pickModel(body.model, rewriteSuite?.rewrite_model) || llmModel();
+
     // Orchestration step: turn the full feedback + current copy into a single
     // coherence thesis before drafting. Uses the suite's prompt (or the default).
     const orchestrationPrompt = await resolveOrchestrationPrompt(store, body.suite_id);
@@ -929,11 +1050,10 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       const orchPrompt = buildOrchestrationPrompt({
         systemPrompt, productSection, originalContent, feedback: body.feedback,
       }, orchestrationPrompt);
-      const orchResp = await aiClient().chat.completions.create({
-        model: llmModel(),
+      thesis = (await chatText({
+        model: rewriteModel,
         messages: [{ role: "user", content: orchPrompt }],
-      });
-      thesis = (orchResp.choices[0]?.message?.content || "").trim();
+      })).trim();
     } catch (err) {
       // Don't fail the whole rewrite if orchestration fails — fall back to a
       // thesis-less rewrite so the feature degrades gracefully.
@@ -950,11 +1070,10 @@ export function createApp({ store, resultsDir, staticDir = null }) {
 
     let improved;
     try {
-      const response = await aiClient().chat.completions.create({
-        model: llmModel(),
+      improved = await chatText({
+        model: rewriteModel,
         messages: [{ role: "user", content: rewritePrompt }],
       });
-      improved = response.choices[0]?.message?.content || "";
     } catch (err) {
       throw new HttpError(500, `Rewrite failed: ${err.message || err}`);
     }
