@@ -23,7 +23,7 @@ export function useCreateSuite() {
 export function useUpdateSuite() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: Partial<Pick<Suite, "name" | "description" | "active">> }) =>
+    mutationFn: ({ id, data }: { id: string; data: Partial<Pick<Suite, "name" | "description" | "active" | "rewrite_orchestration_prompt" | "eval_model" | "rewrite_model">> }) =>
       suitesApi.update(id, data),
     onSuccess: () => qc.invalidateQueries({ queryKey: SUITES_QUERY_KEY }),
   });

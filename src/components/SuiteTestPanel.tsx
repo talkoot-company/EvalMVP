@@ -17,6 +17,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ScoreBadge } from "@/components/ScoreBadge";
+import { ModelSelect } from "@/components/ModelSelect";
 import { FilterDropdown } from "@/components/CriteriaFilterBar";
 import { useGenerationDatasets, useLengthPercentiles } from "@/hooks/useGenerations";
 import { datasetLabel } from "@/lib/datasets";
@@ -103,11 +104,17 @@ function CellContent({ cell }: { cell?: Cell }) {
 export function SuiteTestPanel({
   suiteId,
   selectedCriteria,
+  defaultEvalModel,
 }: {
   suiteId: string;
   selectedCriteria: Criterion[];
+  // The suite's persisted eval model (null → gpt-5). The panel's picker defaults
+  // to this; changing it overrides for this session only (never persisted).
+  defaultEvalModel?: string | null;
 }) {
   const [testSet, setTestSet] = useState<Set<string>>(() => loadTestSet(suiteId));
+  // Session-only eval model override. null → use the suite's configured model.
+  const [modelOverride, setModelOverride] = useState<string | null>(null);
   const [showSelector, setShowSelector] = useState(false);
   const [genCache, setGenCache] = useState<Map<string, Generation>>(new Map());
 
@@ -287,7 +294,12 @@ export function SuiteTestPanel({
           });
           return;
         }
-        const r = await evalsApi.run(genId, { criterion_id: crit.id });
+        const r = await evalsApi.run(genId, {
+          criterion_id: crit.id,
+          suite_id: suiteId,
+          // Session override → else the backend falls back to the suite's model.
+          model: modelOverride ?? undefined,
+        });
         setCell(key, {
           status: "done", score: r.score, desired_score: r.desired_score,
           rationale: r.rationale, evidence: r.evidence,
@@ -299,7 +311,7 @@ export function SuiteTestPanel({
     });
 
     setIsRunning(false);
-  }, [isRunning, testSet, selectedCriteria]);
+  }, [isRunning, testSet, selectedCriteria, suiteId, modelOverride]);
 
   const canRun = testSet.size > 0 && selectedCriteria.length > 0 && !isRunning;
 
@@ -540,7 +552,17 @@ export function SuiteTestPanel({
       )}
 
       {/* run */}
-      <div className="flex justify-end">
+      <div className="flex items-center justify-end gap-2">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">Model</span>
+          <ModelSelect
+            className="h-9 w-44 text-xs"
+            value={modelOverride}
+            onChange={setModelOverride}
+            disabled={isRunning}
+            defaultOptionLabel={`Suite default (${defaultEvalModel ?? "gpt-5"})`}
+          />
+        </div>
         <Button className="gap-1.5" disabled={!canRun} onClick={handleRunTest}>
           {isRunning
             ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Running…</>

@@ -13,6 +13,7 @@ import { InlineEdit } from "@/components/InlineEdit";
 import { CriteriaFilterBar } from "@/components/CriteriaFilterBar";
 import { SuiteTestPanel } from "@/components/SuiteTestPanel";
 import { RewriteOrchestrationDialog } from "@/components/RewriteOrchestrationDialog";
+import { ModelSelect } from "@/components/ModelSelect";
 import { ArrowLeft, Loader2, Eye, EyeOff, ChevronUp, X, Plus, Download, Wand2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { downloadJson } from "@/lib/download";
@@ -114,6 +115,14 @@ export default function SuiteDetailPage() {
   });
 
   function saveField(field: "name" | "description" | "rewrite_orchestration_prompt", value: string) {
+    toast.promise(saveMutation.mutateAsync({ [field]: value }), {
+      loading: "Saving…",
+      success: "Saved",
+      error: (e) => `Save failed: ${e instanceof Error ? e.message : String(e)}`,
+    });
+  }
+
+  function saveModel(field: "eval_model" | "rewrite_model", value: string | null) {
     toast.promise(saveMutation.mutateAsync({ [field]: value }), {
       loading: "Saving…",
       success: "Saved",
@@ -235,6 +244,32 @@ export default function SuiteDetailPage() {
         saving={saveMutation.isPending}
       />
 
+      {/* Per-suite models (persisted). null → default (gpt-5). */}
+      <Section title="Models">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium">Eval model</label>
+            <ModelSelect
+              className="h-9 w-full text-xs"
+              value={suite.eval_model}
+              onChange={(v) => saveModel("eval_model", v)}
+              disabled={saveMutation.isPending}
+            />
+            <p className="text-[11px] text-muted-foreground">Used to assess copy against this suite's criteria.</p>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium">Rewrite model</label>
+            <ModelSelect
+              className="h-9 w-full text-xs"
+              value={suite.rewrite_model}
+              onChange={(v) => saveModel("rewrite_model", v)}
+              disabled={saveMutation.isPending}
+            />
+            <p className="text-[11px] text-muted-foreground">Used for the orchestration + rewrite steps.</p>
+          </div>
+        </div>
+      </Section>
+
       {/* Associated criteria */}
       <Section
         title={`Associated criteria (${associated.size} selected)`}
@@ -318,7 +353,7 @@ export default function SuiteDetailPage() {
 
       {/* Test — run selected criteria against selected generations */}
       <Section title="Test">
-        <SuiteTestPanel suiteId={suite.id} selectedCriteria={selected} />
+        <SuiteTestPanel suiteId={suite.id} selectedCriteria={selected} defaultEvalModel={suite.eval_model} />
       </Section>
     </div>
   );
