@@ -174,6 +174,11 @@ export default function SuiteWorkflowRunPage() {
     queryKey: ["suite-workflow-run", runId],
     queryFn: () => suiteWorkflowsApi.runs.get(runId!),
     enabled: !!runId,
+    // Server-executed runs advance on the backend — poll for their progress.
+    refetchInterval: (query) => {
+      const r = query.state.data;
+      return r?.data?.executor === "server" && r.status === "running" ? 1500 : false;
+    },
   });
   const { data: workflow } = useQuery({
     queryKey: ["suite-workflows", id],
@@ -245,9 +250,11 @@ export default function SuiteWorkflowRunPage() {
     }
   }, [run, workflow, suites, criteria, runId]);
 
-  // Auto-run once when this is a fresh run and all inputs are loaded.
+  // Auto-run once when this is a fresh run and all inputs are loaded. Server-executed
+  // runs (invoke endpoint) advance on the backend — never drive them from the client.
   useEffect(() => {
     if (started.current || !run || !workflow) return;
+    if (run.data?.executor === "server") { started.current = true; return; }
     const alreadyRan = (run.data?.stages?.length ?? 0) > 0 || run.status !== "running";
     if (alreadyRan) return;
     if (!suites.length || !criteria.length) return;

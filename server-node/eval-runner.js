@@ -36,30 +36,49 @@ function anthropicEndpoint() {
 }
 
 const ANTHROPIC_MAX_TOKENS = Number(process.env.AZURE_ANTHROPIC_MAX_TOKENS || 8192);
+const ANTHROPIC_TIMEOUT_MS = Number(process.env.AZURE_ANTHROPIC_TIMEOUT_MS || 240000);
+const ANTHROPIC_MAX_ATTEMPTS = 3;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Call a Claude deployment via the native Anthropic Messages API. Adapts the
 // OpenAI-style message array (system pulled out as a top-level field) and returns
-// the concatenated text blocks (thinking blocks are ignored).
+// the concatenated text blocks (thinking blocks are ignored). Retries transient
+// failures (network "fetch failed", timeouts, 429/5xx) — the OpenAI SDK path
+// retries on its own, so this brings the raw-fetch path to parity, which matters
+// for long server-side runs that make many sequential calls.
 async function anthropicComplete(messages, model) {
   const apiKey = process.env.AZURE_OPENAI_API_KEY;
   if (!apiKey) throw new Error("AZURE_OPENAI_API_KEY not set");
   const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n") || undefined;
   const turns = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role, content: m.content }));
-  const res = await fetch(`${anthropicEndpoint()}/anthropic/v1/messages`, {
+  const url = `${anthropicEndpoint()}/anthropic/v1/messages`;
+  const init = {
     method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
+    headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
     body: JSON.stringify({ model, system, max_tokens: ANTHROPIC_MAX_TOKENS, messages: turns }),
-  });
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`Anthropic API ${res.status}: ${t.slice(0, 300)}`);
+  };
+
+  let lastErr;
+  for (let attempt = 1; attempt <= ANTHROPIC_MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(ANTHROPIC_TIMEOUT_MS) });
+      if (res.status === 429 || res.status >= 500) {
+        lastErr = new Error(`Anthropic API ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
+      } else if (!res.ok) {
+        // Deterministic client error (400/401/404…) — don't retry.
+        const t = await res.text().catch(() => "");
+        throw new Error(`Anthropic API ${res.status}: ${t.slice(0, 300)}`);
+      } else {
+        const data = await res.json();
+        return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+      }
+    } catch (err) {
+      lastErr = err; // network error ("fetch failed"), abort/timeout, or a thrown 4xx
+      if (/Anthropic API 4\d\d/.test(String(err.message))) throw err; // non-retryable
+    }
+    if (attempt < ANTHROPIC_MAX_ATTEMPTS) await sleep(1000 * attempt); // linear backoff
   }
-  const data = await res.json();
-  return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+  throw lastErr;
 }
 
 // Unified text completion. Routes Anthropic-format deployments to the Anthropic
