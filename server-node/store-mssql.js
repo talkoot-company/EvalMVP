@@ -421,6 +421,14 @@ export async function createMssqlStore({ adonet, database, prefix }) {
     getGeneration: async (id) =>
       fixGeneration(await one(`SELECT * FROM ${tbl("generations")} WHERE generation_id=@p0`, [id])),
 
+    // Insert an API-uploaded generation, then classify its gen_type via the same
+    // SQL CASE used everywhere else (no JS reimplementation → no classifier drift).
+    insertGeneration: async (obj) => {
+      await insertRow("generations", obj);
+      await q(`UPDATE ${tbl("generations")} SET gen_type=(${TYPE_CASE_SQL}) WHERE generation_id=@p0`, [obj.generation_id]);
+    },
+    deleteGeneration: (id) => q(`DELETE FROM ${tbl("generations")} WHERE generation_id=@p0`, [id]),
+
     // product data (extracted product record persisted per generation)
     setProductJson: (generationId, productJson) =>
       updateRow("generations", "generation_id", generationId, { product_json: productJson }),

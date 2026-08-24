@@ -654,6 +654,180 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     res.json(await store.listSuiteWorkflowRuns(req.params.id));
   }));
 
+  // Create a generation from an inline payload (chat chain and/or copy). Shared by
+  // POST /generations and the inline workflow-invoke endpoint. Returns the new
+  // generation_id. Throws HttpError(422) if there's nothing to store.
+  async function createGenerationFromInput(body) {
+    const messages = Array.isArray(body.messages) ? body.messages.filter((m) => m && typeof m === "object") : [];
+
+    // The copy to eval/rewrite: explicit response_content, else the last assistant turn.
+    let responseContent = typeof body.response_content === "string" ? body.response_content : "";
+    if (!responseContent) {
+      const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+      if (lastAssistant) responseContent = String(lastAssistant.content ?? "");
+    }
+    if (!responseContent.trim() && !messages.length) {
+      throw new HttpError(422, "Provide `messages` (a chat chain) and/or `response_content`.");
+    }
+
+    const systemFromChain = messages.find((m) => m.role === "system");
+    const userMessages = messages.filter((m) => m.role === "user");
+    const assistantCount = messages.filter((m) => m.role === "assistant").length;
+    const systemPrompt = typeof body.system_prompt === "string"
+      ? body.system_prompt
+      : (systemFromChain ? String(systemFromChain.content ?? "") : "");
+    const lastUser = userMessages.length ? String(userMessages[userMessages.length - 1].content ?? "") : "";
+
+    const hasProductJson = body.product_json !== undefined && body.product_json !== null;
+    const id = randomUUID();
+    await store.insertGeneration({
+      generation_id: id,
+      model: body.model ?? null,
+      created_at: Math.floor(Date.now() / 1000),
+      system_prompt: systemPrompt || null,
+      last_user_message: lastUser || null,
+      few_shot_count: assistantCount,
+      response_content: responseContent || null,
+      is_valid: 1,
+      req_json: JSON.stringify({ messages }),
+      resp_json: null,
+      product_json: hasProductJson ? JSON.stringify(body.product_json) : null,
+      dataset: body.dataset ?? "api-upload",
+    });
+
+    if (!hasProductJson && body.extract_product_data !== false) {
+      const genRow = await store.getGeneration(id);
+      try {
+        await resolveProductDataForGeneration(store, genRow, messages, {
+          allowAi: true, extractionTemplate: await loadTemplate("product_extraction"),
+        });
+      } catch (err) {
+        console.error(`[generations] product extraction failed for ${id}: ${err.message || err}`);
+      }
+    }
+    return id;
+  }
+
+  // Server-side workflow execution (the port of src/lib/runWorkflow.ts). Runs the
+  // ordered chain in the background, persisting the run row after every stage so
+  // pollers see progress. Used by the invoke endpoint; the browser-driven flow
+  // (client executes + PUTs) is unaffected because those runs aren't invoked here.
+  async function executeWorkflowRun(runId) {
+    const WF_MAX_ITERS = { assess_only: 0, rewrite_once: 1, rewrite_until_pass: 3 };
+    const isPass = (g) => String(g.score) === String(g.desired_score);
+    const resolveModel = (override, suiteModel) => override ?? suiteModel ?? DEFAULT_MODEL;
+
+    const run = await store.getSuiteWorkflowRun(runId);
+    if (!run) return;
+    const workflow = await store.getSuiteWorkflow(run.workflow_id);
+    const genRow = await store.getGeneration(run.generation_id);
+    if (!workflow || !genRow) {
+      await store.updateSuiteWorkflowRun(runId, { status: "error", data: { ...run.data, stages: run.data?.stages ?? [] } });
+      return;
+    }
+
+    const data = run.data || {};
+    const steps = workflow.steps || [];
+    const evalOverride = data.eval_model ?? null;
+    const rewriteOverride = data.rewrite_model ?? null;
+    const originalCopy = data.original_copy ?? (genRow.response_content || "");
+
+    // Grounding + templates, resolved once for the whole run.
+    let reqData = {};
+    try { reqData = typeof genRow.req_json === "string" ? JSON.parse(genRow.req_json) : (genRow.req_json || {}); } catch { reqData = {}; }
+    const requestMessages = reqData.messages || [];
+    const { productData } = await resolveProductDataForGeneration(
+      store, genRow, requestMessages, { allowAi: true, extractionTemplate: await loadTemplate("product_extraction") },
+    );
+    const systemPrompt = genRow.system_prompt || "";
+    const productSection = groundingSection(genRow);
+    const evalTemplate = await loadTemplate("eval_grading");
+    const rewriteTemplate = await loadTemplate("rewrite_aggregate");
+
+    const stages = [];
+    let inputCopy = originalCopy;
+    const persist = (status) =>
+      store.updateSuiteWorkflowRun(runId, {
+        status,
+        data: { ...data, generation_id: run.generation_id, original_copy: originalCopy, stages },
+      });
+
+    const assess = async (content, stepCriteria, model) => {
+      const grades = [];
+      for (const crit of stepCriteria) {
+        const r = await runSingleEval(content, productData, crit, evalTemplate, model);
+        grades.push({
+          criterion_id: r.criterion_id, criterion_name: r.criterion_name,
+          score: r.score, desired_score: r.desired_score, rationale: r.rationale, evidence: r.evidence,
+        });
+      }
+      return grades;
+    };
+
+    const rewriteOnce = async (base, feedback, suite, model) => {
+      const orchestrationPrompt = (suite && typeof suite.rewrite_orchestration_prompt === "string" && suite.rewrite_orchestration_prompt.trim())
+        ? suite.rewrite_orchestration_prompt : DEFAULT_REWRITE_ORCHESTRATION_PROMPT;
+      let thesis = "";
+      try {
+        const orchPrompt = buildOrchestrationPrompt({ systemPrompt, productSection, originalContent: base, feedback }, orchestrationPrompt);
+        thesis = (await chatText({ model, messages: [{ role: "user", content: orchPrompt }] })).trim();
+      } catch (err) {
+        console.error(`[workflow-run ${runId}] orchestration failed, continuing without thesis: ${err.message || err}`);
+      }
+      const rewritePrompt = buildRewritePrompt({ systemPrompt, productSection, originalContent: base, feedback, thesis }, rewriteTemplate);
+      const improved = (await chatText({ model, messages: [{ role: "user", content: rewritePrompt }] })).trim();
+      return { improved_content: improved, thesis };
+    };
+
+    try {
+      for (let position = 0; position < steps.length; position++) {
+        const step = steps[position];
+        const suite = await store.getSuite(step.suite_id);
+        const critIds = await store.getSuiteCriterionIds(step.suite_id);
+        const stepCriteria = [];
+        for (const cid of critIds) { const c = await store.getCriterion(cid); if (c) stepCriteria.push(rowToCriterion(c)); }
+
+        const stageEval = resolveModel(evalOverride, suite?.eval_model);
+        const stageRewrite = resolveModel(rewriteOverride, suite?.rewrite_model);
+        const stage = {
+          position, suite_id: step.suite_id, suite_name: suite?.name ?? step.suite_id, mode: step.mode,
+          input_copy: inputCopy, initial_grades: [], iterations: [], output_copy: inputCopy,
+          status: "running", eval_model: stageEval, rewrite_model: stageRewrite,
+        };
+        stages.push(stage);
+        await persist("running");
+
+        // 1) Assess the incoming copy.
+        stage.initial_grades = await assess(inputCopy, stepCriteria, stageEval);
+        await persist("running");
+
+        // 2) Rewrite per mode, feeding each rewrite forward and re-grading.
+        const maxIters = WF_MAX_ITERS[step.mode] ?? 0;
+        let base = inputCopy;
+        let feedback = stage.initial_grades;
+        for (let i = 0; i < maxIters; i++) {
+          const { improved_content, thesis } = await rewriteOnce(base, feedback, suite, stageRewrite);
+          const grades = await assess(improved_content, stepCriteria, stageEval);
+          stage.iterations.push({ content: improved_content, thesis, grades, created_at: new Date().toISOString() });
+          stage.output_copy = improved_content;
+          await persist("running");
+          base = improved_content;
+          feedback = grades;
+          if (step.mode === "rewrite_until_pass" && grades.length > 0 && grades.every(isPass)) break;
+        }
+
+        stage.status = "done";
+        inputCopy = stage.output_copy;
+        await persist("running");
+      }
+      await persist("done");
+    } catch (err) {
+      console.error(`[workflow-run ${runId}] failed: ${err.message || err}`);
+      if (stages.length) { stages[stages.length - 1].status = "error"; stages[stages.length - 1].error = String(err.message || err); }
+      await persist("error").catch(() => {});
+    }
+  }
+
   app.post("/api/suite-workflows/:id/runs", route(async (req, res) => {
     if (!(await store.getSuiteWorkflow(req.params.id))) throw new HttpError(404, "Suite workflow not found");
     const body = req.body || {};
@@ -667,6 +841,73 @@ export function createApp({ store, resultsDir, staticDir = null }) {
       data: body.data ?? {},
     });
     res.status(201).json(await store.getSuiteWorkflowRun(id));
+  }));
+
+  // Invoke: create a run AND execute the whole pipeline server-side (background),
+  // then poll GET /api/suite-workflow-runs/:runId until status is done/error.
+  // Body: { generation_id, eval_model?, rewrite_model? } (models are run-level
+  // overrides; omit to use each step-suite's configured model). Returns 202 + run.
+  app.post("/api/suite-workflows/:id/runs/invoke", route(async (req, res) => {
+    const workflow = await store.getSuiteWorkflow(req.params.id);
+    if (!workflow) throw new HttpError(404, "Suite workflow not found");
+    const body = req.body || {};
+    if (!body.generation_id) throw new HttpError(422, "generation_id is required");
+    if (!(workflow.steps || []).length) throw new HttpError(422, "Workflow has no steps");
+    const genRow = await store.getGeneration(String(body.generation_id));
+    if (!genRow) throw new HttpError(404, "Generation not found");
+
+    const id = randomUUID();
+    await store.createSuiteWorkflowRun({
+      id,
+      workflow_id: req.params.id,
+      generation_id: String(body.generation_id),
+      status: "running",
+      data: {
+        generation_id: String(body.generation_id),
+        original_copy: genRow.response_content || "",
+        stages: [],
+        eval_model: pickModel(body.eval_model),      // validated override or null
+        rewrite_model: pickModel(body.rewrite_model),
+        executor: "server",
+      },
+    });
+    // Fire-and-forget: the run persists progress to its row as it goes.
+    executeWorkflowRun(id).catch((err) => console.error(`[workflow-run ${id}] crashed: ${err.message || err}`));
+    res.status(202).json(await store.getSuiteWorkflowRun(id));
+  }));
+
+  // Convenience: create a generation from inline copy AND run the workflow on it in
+  // one call (does the /generations upload behind the scenes, then invokes). Body is
+  // the /generations payload { messages?, response_content?, system_prompt?,
+  // product_json?, model?, dataset?, extract_product_data? } plus optional run-level
+  // { eval_model?, rewrite_model? }. Returns 202 + the run (run.generation_id is the
+  // generation that was created). Poll GET /suite-workflow-runs/:runId as usual.
+  app.post("/api/suite-workflows/:id/runs/invoke-inline", route(async (req, res) => {
+    const workflow = await store.getSuiteWorkflow(req.params.id);
+    if (!workflow) throw new HttpError(404, "Suite workflow not found");
+    if (!(workflow.steps || []).length) throw new HttpError(422, "Workflow has no steps");
+    const body = req.body || {};
+
+    const generationId = await createGenerationFromInput(body); // throws 422 if no copy/chain
+    const genRow = await store.getGeneration(generationId);
+
+    const runId = randomUUID();
+    await store.createSuiteWorkflowRun({
+      id: runId,
+      workflow_id: req.params.id,
+      generation_id: generationId,
+      status: "running",
+      data: {
+        generation_id: generationId,
+        original_copy: genRow.response_content || "",
+        stages: [],
+        eval_model: pickModel(body.eval_model),
+        rewrite_model: pickModel(body.rewrite_model),
+        executor: "server",
+      },
+    });
+    executeWorkflowRun(runId).catch((err) => console.error(`[workflow-run ${runId}] crashed: ${err.message || err}`));
+    res.status(202).json(await store.getSuiteWorkflowRun(runId));
   }));
 
   app.get("/api/suite-workflow-runs/:runId", route(async (req, res) => {
@@ -689,6 +930,19 @@ export function createApp({ store, resultsDir, staticDir = null }) {
   }));
 
   // ----- Generations routes (literal routes must register before /:id) -----
+
+  // Create ("upload") a generation from a chat chain so it can be run through a
+  // suite workflow or evaluated directly. Body:
+  //   { messages?: [{role,content}], response_content?, system_prompt?,
+  //     product_json?, model?, dataset?, extract_product_data? (default true) }
+  // At least one of `messages` or `response_content` is required. system_prompt and
+  // last_user_message are derived from `messages` when not given; product_json is
+  // extracted from `messages` (heuristic + AI) unless supplied or disabled. Returns
+  // the created generation (use its generation_id with the workflow invoke endpoint).
+  app.post("/api/generations", route(async (req, res) => {
+    const id = await createGenerationFromInput(req.body || {});
+    res.status(201).json(rowToGeneration(await store.getGeneration(id), true));
+  }));
 
   app.get("/api/generations", route(async (req, res) => {
     const search = req.query.search || "";
@@ -733,6 +987,12 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     const row = await store.getGeneration(req.params.id);
     if (!row) throw new HttpError(404, "Generation not found");
     res.json(rowToGeneration(row, true));
+  }));
+
+  app.delete("/api/generations/:id", route(async (req, res) => {
+    if (!(await store.getGeneration(req.params.id))) throw new HttpError(404, "Generation not found");
+    await store.deleteGeneration(req.params.id);
+    res.status(204).end();
   }));
 
   // ----- Type-mapping routes -----

@@ -356,6 +356,14 @@ export function createSqliteStore(dbPath) {
     },
     getGeneration: (id) => db.prepare("SELECT * FROM generations WHERE generation_id=?").get(id) || null,
 
+    // Insert an API-uploaded generation, then classify its gen_type via the same
+    // SQL CASE used everywhere else (no JS reimplementation → no classifier drift).
+    insertGeneration: (obj) => {
+      insertRow("generations", obj);
+      db.prepare(`UPDATE generations SET gen_type=(${TYPE_CASE_SQL}) WHERE generation_id=?`).run(obj.generation_id);
+    },
+    deleteGeneration: (id) => db.prepare("DELETE FROM generations WHERE generation_id=?").run(id),
+
     // Persist the (keyword-derived) generation type so it can be filtered/indexed
     // cheaply instead of recomputing CHARINDEX/instr over system_prompt per query.
     // One-time classification of unclassified rows; returns the number updated.
