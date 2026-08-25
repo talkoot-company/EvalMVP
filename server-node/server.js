@@ -524,6 +524,33 @@ export function createApp({ store, resultsDir, staticDir = null }) {
     res.json(rows.map((r) => ({ ...rowToSuite(r), criteria_ids: bySuite.get(r.id) ?? [] })));
   }));
 
+  // Enumeration: just { id, name } per suite — a lightweight list for pickers.
+  // Registered before /suites/:id so "names" isn't captured as an :id.
+  app.get("/api/suites/names", route(async (req, res) => {
+    const rows = await store.listSuites();
+    res.json(rows.map((r) => ({ id: r.id, name: r.name })));
+  }));
+
+  // Metadata for one suite: a summary (counts + config), not the full criteria list.
+  app.get("/api/suites/:id/metadata", route(async (req, res) => {
+    const row = await store.getSuite(req.params.id);
+    if (!row) throw new HttpError(404, "Suite not found");
+    const s = rowToSuite(row);
+    const criteriaIds = await store.getSuiteCriterionIds(req.params.id);
+    res.json({
+      id: s.id,
+      name: s.name,
+      description: s.description ?? null,
+      active: s.active,
+      eval_model: s.eval_model ?? null,
+      rewrite_model: s.rewrite_model ?? null,
+      has_orchestration_prompt: Boolean(s.rewrite_orchestration_prompt),
+      criteria_count: criteriaIds.length,
+      created_at: s.created_at,
+      updated_at: s.updated_at,
+    });
+  }));
+
   app.post("/api/suites", route(async (req, res) => {
     const body = req.body || {};
     if (!body.name || !String(body.name).trim()) throw new HttpError(422, "name is required");
@@ -605,6 +632,43 @@ export function createApp({ store, resultsDir, staticDir = null }) {
 
   app.get("/api/suite-workflows", route(async (req, res) => {
     res.json(await store.listSuiteWorkflows());
+  }));
+
+  // Enumeration: just { id, name } per workflow. Before /:id so "names" isn't an :id.
+  app.get("/api/suite-workflows/names", route(async (req, res) => {
+    const rows = await store.listSuiteWorkflows();
+    res.json(rows.map((w) => ({ id: w.id, name: w.name })));
+  }));
+
+  // Metadata for one workflow: step count + each step resolved to its suite name,
+  // mode and criteria count, plus how many runs it has.
+  app.get("/api/suite-workflows/:id/metadata", route(async (req, res) => {
+    const wf = await store.getSuiteWorkflow(req.params.id);
+    if (!wf) throw new HttpError(404, "Suite workflow not found");
+    const steps = wf.steps || [];
+    const resolvedSteps = [];
+    for (let i = 0; i < steps.length; i++) {
+      const suite = await store.getSuite(steps[i].suite_id);
+      const criteriaIds = suite ? await store.getSuiteCriterionIds(steps[i].suite_id) : [];
+      resolvedSteps.push({
+        position: i,
+        suite_id: steps[i].suite_id,
+        suite_name: suite ? suite.name : null,
+        mode: steps[i].mode,
+        criteria_count: criteriaIds.length,
+      });
+    }
+    const runs = await store.listSuiteWorkflowRuns(req.params.id);
+    res.json({
+      id: wf.id,
+      name: wf.name,
+      description: wf.description ?? null,
+      step_count: steps.length,
+      steps: resolvedSteps,
+      run_count: runs.length,
+      created_at: wf.created_at,
+      updated_at: wf.updated_at,
+    });
   }));
 
   app.post("/api/suite-workflows", route(async (req, res) => {
