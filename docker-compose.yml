@@ -1,0 +1,25 @@
+services:
+  evalmvp:
+    build: .
+    image: evalmvp:local
+    ports:
+      - "8000:8000"
+    # The SQL password contains '#' and '$$'. dotenv truncates at '#' and Docker
+    # Compose interpolation (even via env_file) collapses '$$' -> '$', both of
+    # which corrupt it. So we MOUNT .env.docker into the container and the app
+    # reads the connstring raw from the file (server-node/index.js rawConnstring).
+    # .env.docker also supplies the Azure OpenAI creds (loaded via dotenv).
+    volumes:
+      - ./.env.docker:/app/.env.docker:ro
+    environment:
+      - NODE_ENV=production
+      - DB_BACKEND=mssql
+      - HOST=0.0.0.0
+      - PORT=8000
+      - SERVE_STATIC=true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

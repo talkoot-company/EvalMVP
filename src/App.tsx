@@ -6,7 +6,16 @@ import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from "rea
 import { AppLayout } from "@/components/AppLayout";
 import CriteriaPage from "./pages/CriteriaPage";
 import SuitesPage from "./pages/SuitesPage";
+import PromptsPage from "./pages/PromptsPage";
 import EvaluatePage from "./pages/EvaluatePage";
+import GenerationsPage from "./pages/GenerationsPage";
+import MappingPage from "./pages/MappingPage";
+import CriterionDetailPage from "./pages/CriterionDetailPage";
+import SuiteDetailPage from "./pages/SuiteDetailPage";
+import SuiteWorkflowsPage from "./pages/SuiteWorkflowsPage";
+import SuiteWorkflowDetailPage from "./pages/SuiteWorkflowDetailPage";
+import SuiteWorkflowRunPage from "./pages/SuiteWorkflowRunPage";
+import DataPage from "./pages/DataPage";
 import LoginPage from "./pages/LoginPage";
 import NotFound from "./pages/NotFound";
 import { isAuthenticated } from "@/lib/auth";
@@ -34,7 +43,16 @@ const App = () => (
               <Route path="/" element={<CriteriaPage />} />
               <Route path="/criteria" element={<CriteriaPage />} />
               <Route path="/suites" element={<SuitesPage />} />
+              <Route path="/suites/:id" element={<SuiteDetailPage />} />
+              <Route path="/suite-workflows" element={<SuiteWorkflowsPage />} />
+              <Route path="/suite-workflows/:id" element={<SuiteWorkflowDetailPage />} />
+              <Route path="/suite-workflows/:id/runs/:runId" element={<SuiteWorkflowRunPage />} />
+              <Route path="/prompts" element={<PromptsPage />} />
               <Route path="/evaluate" element={<EvaluatePage />} />
+              <Route path="/generations" element={<GenerationsPage />} />
+              <Route path="/mapping" element={<MappingPage />} />
+              <Route path="/data" element={<DataPage />} />
+              <Route path="/criteria/:id" element={<CriterionDetailPage />} />
             </Route>
           </Route>
           <Route path="*" element={<NotFound />} />

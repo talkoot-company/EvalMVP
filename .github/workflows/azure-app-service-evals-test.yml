@@ -1,0 +1,42 @@
+name: Deploy evals_test to Azure App Service
+
+on:
+  push:
+    branches:
+      - evals_test
+  workflow_dispatch: # allow manual runs from the Actions tab
+
+env:
+  APP_NAME: app-test-evalmvp # Azure App Service (rg-test, created via Terraform)
+  NODE_VERSION: "22.x"
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    name: Build and Deploy (App Service, code mode)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend (Vite -> dist/)
+        run: npm run build
+
+      # Drop dev dependencies so only the runtime deps (express, mssql, etc.)
+      # ship to App Service. server-node/ runs from source — no build needed.
+      - name: Prune to production dependencies
+        run: npm prune --omit=dev
+
+      - name: Deploy to Azure App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.APP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_EVALS }}
+          package: .

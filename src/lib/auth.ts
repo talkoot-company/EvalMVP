@@ -21,4 +21,3 @@ export const loginWithPassword = (password: string) => {
 export const logout = () => {
   window.localStorage.removeItem(AUTH_STORAGE_KEY);
 };
-
