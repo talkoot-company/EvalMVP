@@ -14,6 +14,10 @@ dist-ssr
 .env
 .env.docker
 
+# Test/coverage artifacts (generated in CI)
+coverage/
+*.junit.xml
+
 # Generated data bootstrap/export zips (large, regenerate via Data → Export)
 evalmvp-*.zip
 
